@@ -1004,6 +1004,76 @@ button:disabled {
     color: var(--button-danger-bg);
 }
 
+/* ── Searchable select（可输入筛选的下拉） ── */
+.searchable-select {
+    position: relative;
+}
+
+/* 预留右侧箭头空间，避免长文本压住箭头 */
+.searchable-select input {
+    padding-right: 22px;
+}
+
+.searchable-select input:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+/* 下拉指示箭头：纯装饰不拦截点击，保证点击即聚焦输入框 */
+.searchable-select::after {
+    content: "▾";
+    position: absolute;
+    top: 50%;
+    right: 8px;
+    transform: translateY(-50%);
+    font-size: 10px;
+    color: var(--text-secondary);
+    pointer-events: none;
+}
+
+/* 候选列表限高并可滚动，选项再多也不会铺满整屏 */
+.searchable-select-list {
+    position: absolute;
+    top: calc(100% + 2px);
+    left: 0;
+    right: 0;
+    z-index: 20;
+    max-height: 220px;
+    overflow-y: auto;
+    padding: 2px 0;
+    list-style: none;
+    background-color: var(--input-bg);
+    border: 1px solid var(--input-border);
+    border-radius: 3px;
+    box-shadow: var(--shadow);
+}
+
+.searchable-select-option {
+    padding: 4px 9px;
+    font-size: 12px;
+    color: var(--text-primary);
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.searchable-select-option.active {
+    background-color: var(--bg-hover);
+}
+
+.searchable-select-option.selected {
+    background-color: var(--bg-selected);
+    color: var(--text-selected);
+}
+
+.searchable-select-empty {
+    padding: 8px 9px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    text-align: center;
+}
+
 /* ── Inline dialog error banner ── */
 .form-submit-error {
     margin-top: 10px;

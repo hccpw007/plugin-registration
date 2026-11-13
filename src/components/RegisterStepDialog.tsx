@@ -1,7 +1,10 @@
 import { useState, useEffect, useRef } from "react";
 import type { PluginType, ProcessingStep, SdkMessage, SdkMessageFilter, SystemUser } from "../models/interfaces";
 import { DataverseClient } from "../utils/DataverseClient";
+import { sortMessagesByUsage } from "../utils/sdk-messages";
 import { AttributePickerDialog } from "./AttributePickerDialog";
+import { SearchableSelect } from "./SearchableSelect";
+import type { SearchableSelectOption } from "./SearchableSelect";
 import { UserPickerDialog } from "./UserPickerDialog";
 
 interface RegisterStepDialogProps {
@@ -189,6 +192,18 @@ export function RegisterStepDialog({
     const canBrowseAttrs = isUpdateMessage && !!entityName && entityName !== "none" && entityName !== "any";
     const asyncEnabled = asyncAllowed(stage);
 
+    // Message 候选项：空值项保持首位，常用消息置顶，其余按名称排序
+    const messageOptions: SearchableSelectOption[] = [
+        { value: "", label: "— Select Message —" },
+        ...sortMessagesByUsage(messages).map((m) => ({ value: m.sdkmessageid, label: m.name })),
+    ];
+
+    // 主实体候选项：首项为空值，表示消息级（全局）步骤，不限定实体
+    const filterOptions: SearchableSelectOption[] = [
+        { value: "", label: "None (Global)" },
+        ...filters.map((f) => ({ value: f.sdkmessagefilterid, label: f.primaryobjecttypecode })),
+    ];
+
     const getImpersonatingUserId = (): string | undefined => {
         if (impersonationMode === "calling") return undefined;
         if (impersonationMode === "system") return systemUserId || undefined;
@@ -269,16 +284,13 @@ export function RegisterStepDialog({
                             {loadingMessages ? (
                                 <div className="form-read-only">Loading messages…</div>
                             ) : (
-                                <select
-                                    className="form-select"
+                                <SearchableSelect
                                     value={selectedMessageId}
-                                    onChange={(e) => setSelectedMessageId(e.target.value)}
-                                >
-                                    <option value="">— Select Message —</option>
-                                    {messages.map((m) => (
-                                        <option key={m.sdkmessageid} value={m.sdkmessageid}>{m.name}</option>
-                                    ))}
-                                </select>
+                                    options={messageOptions}
+                                    onChange={setSelectedMessageId}
+                                    placeholder="— Select Message —"
+                                    emptyText="No matching messages"
+                                />
                             )}
                         </div>
                         <div className="form-row">
@@ -286,19 +298,14 @@ export function RegisterStepDialog({
                             {loadingFilters ? (
                                 <div className="form-read-only">Loading entities…</div>
                             ) : (
-                                <select
-                                    className="form-select"
+                                <SearchableSelect
                                     value={selectedFilterId}
-                                    onChange={(e) => setSelectedFilterId(e.target.value)}
+                                    options={filterOptions}
+                                    onChange={setSelectedFilterId}
+                                    placeholder="None (Global)"
+                                    emptyText="No matching entities"
                                     disabled={!selectedMessageId}
-                                >
-                                    <option value="">None (Global)</option>
-                                    {filters.map((f) => (
-                                        <option key={f.sdkmessagefilterid} value={f.sdkmessagefilterid}>
-                                            {f.primaryobjecttypecode}
-                                        </option>
-                                    ))}
-                                </select>
+                                />
                             )}
                         </div>
                         <div className="form-row">
