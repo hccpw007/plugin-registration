@@ -179,12 +179,14 @@ export function RegisterAssemblyDialog({
 
     const title = isUpdate ? `Update Assembly: ${existingAssembly?.name ?? ""}` : "Register New Assembly";
 
-    // 只有带磁盘路径的记录才能读回内容，浏览器降级记录不进"最近文件"下拉
+    // 只有带磁盘路径的记录才能读回内容，浏览器降级记录不进"最近文件"下拉；
+    // 文件名作为主标签完整显示，大小与修改时间作为灰色小字放在第二行
     const recentFileOptions = recentFiles
         .filter((file) => file.path)
         .map((file) => ({
             value: file.path,
-            label: `${file.name} — ${formatFileSize(file.size)} · ${formatFileTimestamp(file.modifiedAt)}`,
+            label: file.name,
+            description: `${formatFileSize(file.size)} · ${formatFileTimestamp(file.modifiedAt)}`,
         }));
 
     return (

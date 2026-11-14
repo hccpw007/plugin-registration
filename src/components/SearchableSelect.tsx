@@ -5,6 +5,8 @@ import type { KeyboardEvent } from "react";
 export interface SearchableSelectOption {
     value: string;
     label: string;
+    /** 可选的次要说明，显示为标签下方的灰色小字（如文件大小、修改时间） */
+    description?: string;
 }
 
 interface SearchableSelectProps {
@@ -143,7 +145,11 @@ export function SearchableSelect({
                                 onMouseEnter={() => setActiveIndex(index)}
                                 onClick={() => selectOption(option)}
                             >
-                                {option.label}
+                                <span className="searchable-select-option-label">{option.label}</span>
+                                {/* 次要说明：大小、时间等属性信息用小一号的灰字展示 */}
+                                {option.description && (
+                                    <span className="searchable-select-option-desc">{option.description}</span>
+                                )}
                             </li>
                         ))
                     )}

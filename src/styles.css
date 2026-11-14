@@ -1040,16 +1040,15 @@ button:disabled {
 }
 
 .file-info-path {
-    font-size: 11px;
+    font-size: 10px;
     color: var(--text-secondary);
     font-family: "Consolas", "Courier New", monospace;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    /* 路径完整展示：不省略，超长时按任意字符换行 */
+    word-break: break-all;
 }
 
 .file-info-meta {
-    font-size: 11px;
+    font-size: 10px;
     color: var(--text-secondary);
 }
 
@@ -1109,6 +1108,27 @@ button:disabled {
 
 .searchable-select-option.active {
     background-color: var(--bg-hover);
+}
+
+/* 选项标签：单行显示，过长时省略，避免压住第二行的属性信息 */
+.searchable-select-option-label {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* 选项第二行的属性信息（大小、时间），用小一号的灰字与标签区分 */
+.searchable-select-option-desc {
+    display: block;
+    font-size: 10px;
+    color: var(--text-secondary);
+}
+
+/* 选中项为反色背景，属性信息跟随反色并降低不透明度保证可读 */
+.searchable-select-option.selected .searchable-select-option-desc {
+    color: inherit;
+    opacity: 0.85;
 }
 
 .searchable-select-option.selected {
