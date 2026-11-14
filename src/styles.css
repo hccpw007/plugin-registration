@@ -26,6 +26,7 @@
     --badge-danger-text: #ffffff;
     --badge-info-bg: #0078d4;
     --badge-info-text: #ffffff;
+    --warning-text: #a15c00;
     --toolbar-bg: #f0f0f0;
     --toolbar-border: #cccccc;
     --node-assembly-bg: #c47f17;
@@ -1008,6 +1009,11 @@ button:disabled {
 
 .form-hint-error {
     color: var(--button-danger-bg);
+}
+
+/* 缓存副本提示：与普通提示和错误提示都区分开，提醒内容可能已过期 */
+.form-hint-warning {
+    color: var(--warning-text);
 }
 
 /* ── 已选程序集文件信息卡片（名称 / 路径 / 大小与时间） ── */

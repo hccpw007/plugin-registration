@@ -11,6 +11,7 @@ import {
     refreshRecentAssemblyFiles,
 } from "../utils/assembly-file";
 import { NEW_ASSEMBLY_FILE_SCOPE, rememberAssemblyFile } from "../utils/assembly-file-history";
+import { readCachedAssemblyFile, saveCachedAssemblyFile } from "../utils/assembly-file-cache";
 import type { AssemblyFileInfo, LoadedAssemblyFile } from "../utils/assembly-file";
 import { SearchableSelect } from "./SearchableSelect";
 
@@ -48,6 +49,8 @@ export function RegisterAssemblyDialog({
     const [recentFiles, setRecentFiles] = useState<AssemblyFileInfo[]>([]);
     /** 当前文件是否由"最近文件"自动带出，用于提示文件来源 */
     const [restoredFromLast, setRestoredFromLast] = useState(false);
+    /** 当前内容来自本地缓存（宿主重启后无法再读磁盘时），提示用户缓存可能过期 */
+    const [restoredFromCache, setRestoredFromCache] = useState(false);
     /** 正在从磁盘读取文件（选择或恢复最近文件），期间禁用选择入口 */
     const [readingFile, setReadingFile] = useState(false);
     const fileRef = useRef<HTMLInputElement>(null);
@@ -68,10 +71,12 @@ export function RegisterAssemblyDialog({
         setFileError("");
         setSelectedFile(null);
         setRestoredFromLast(false);
+        setRestoredFromCache(false);
         if (fileRef.current) fileRef.current.value = "";
 
         // 自动带出该程序集最近使用的 DLL：历史记录先按磁盘实时状态校验（大小/修改时间重新读取，
-        // 已不存在的记录被清理），再把最近一条读回内存，免去每次重新选文件
+        // 已不存在的记录被清理），再把最近一条读回内存，免去每次重新选文件。
+        // 宿主重启后文件访问授权失效、磁盘读不出来时，回退到上次读取时留下的本地缓存副本
         let cancelled = false;
         setReadingFile(true);
         void (async () => {
@@ -83,15 +88,34 @@ export function RegisterAssemblyDialog({
                 if (!latest) return;
                 const loaded = await loadAssemblyFile(latest.path);
                 if (cancelled) return;
-                if (!loaded) {
-                    // 刚校验通过却读取失败（权限等）：只回显记录元信息，等用户重新选择
+                if (loaded) {
+                    setSelectedFile(loaded.info);
+                    setContent(loaded.content);
+                    setAssemblyName(loaded.info.name.replace(/\.dll$/i, ""));
+                    setRestoredFromLast(true);
+                    // 记下这次的内容，供下次宿主重启后回退使用
+                    void saveCachedAssemblyFile(fileScope, loaded);
+                    return;
+                }
+                const cached = await readCachedAssemblyFile(fileScope, latest.path);
+                if (cancelled) return;
+                if (!cached) {
+                    // 既读不到磁盘也没有缓存：只回显记录元信息，等用户重新选择
                     setSelectedFile(latest);
                     return;
                 }
-                setSelectedFile(loaded.info);
-                setContent(loaded.content);
-                setAssemblyName(loaded.info.name.replace(/\.dll$/i, ""));
+                // 缓存里保存的是真实大小与修改时间，补回列表与卡片的展示
+                const cachedInfo: AssemblyFileInfo = {
+                    ...latest,
+                    size: cached.size,
+                    modifiedAt: cached.modifiedAt,
+                };
+                setRecentFiles(files.map((file) => (file.path === latest.path ? cachedInfo : file)));
+                setSelectedFile(cachedInfo);
+                setContent(cached.content);
+                setAssemblyName(cached.name.replace(/\.dll$/i, ""));
                 setRestoredFromLast(true);
+                setRestoredFromCache(true);
             } catch (e) { // 恢复失败不阻断用户手动选择
                 console.error("[RegisterAssemblyDialog] 恢复最近使用的程序集文件失败:", e);
             } finally {
@@ -110,6 +134,9 @@ export function RegisterAssemblyDialog({
         setContent(loaded.content);
         setAssemblyName(loaded.info.name.replace(/\.dll$/i, ""));
         setRestoredFromLast(fromRecent);
+        setRestoredFromCache(false);
+        // 更新本地缓存：宿主重启后若无法再读磁盘，用这份内容回退
+        void saveCachedAssemblyFile(fileScope, loaded);
         setRecentFiles(await refreshRecentAssemblyFiles(fileScope));
     };
 
@@ -136,6 +163,23 @@ export function RegisterAssemblyDialog({
         try {
             const loaded = await loadAssemblyFile(path);
             if (!loaded) {
+                // 磁盘读不到（宿主重启后授权失效）时回退到该文件上次的缓存副本
+                const cached = await readCachedAssemblyFile(fileScope, path);
+                if (cached) {
+                    rememberAssemblyFile(fileScope, path, Date.now());
+                    setSelectedFile({
+                        path,
+                        name: cached.name,
+                        size: cached.size,
+                        modifiedAt: cached.modifiedAt,
+                        addedAt: Date.now(),
+                    });
+                    setContent(cached.content);
+                    setAssemblyName(cached.name.replace(/\.dll$/i, ""));
+                    setRestoredFromLast(false);
+                    setRestoredFromCache(true);
+                    return;
+                }
                 // 读取失败：重新校验列表（refresh 只清理确认不存在的记录），当前文件保持不变
                 setRecentFiles(await refreshRecentAssemblyFiles(fileScope));
                 setFileError("Unable to read this file. Choose another file.");
@@ -260,8 +304,15 @@ export function RegisterAssemblyDialog({
                             </div>
                         )}
                         {/* 自动带出的文件标注来源，避免用户以为文件是凭空出现的 */}
-                        {restoredFromLast && (
+                        {restoredFromLast && !restoredFromCache && (
                             <div className="form-hint">Loaded automatically from your recent files.</div>
+                        )}
+                        {/* 宿主重启后无法再读磁盘，内容来自上次的缓存副本：明确提示可能已过期 */}
+                        {restoredFromCache && (
+                            <div className="form-hint form-hint-warning">
+                                Loaded from the cached copy saved when you last selected this file. If you rebuilt the dll,
+                                use Browse to re-select it.
+                            </div>
                         )}
                         {/* 只拿到元信息（文件已删除或宿主不支持读取）时提示重新选择 */}
                         {selectedFile && !content && (
