@@ -16,6 +16,9 @@ const CHUNK_SIZE = 256 * 1024;
 /** 单次读取的块数上限，避免超大文件把终端调用拖到不可接受的地步 */
 const MAX_CHUNKS = 512;
 
+/** 压缩包的临时路径：先 gzip 再分块读，终端输出量能少一个数量级 */
+const ARCHIVE_PATH = "/tmp/pptb-assembly-read.gz";
+
 /** 读取结果：成功时给出 Base64 内容，失败时说明原因 */
 export interface ShellContentResult {
     /** Base64 编码的文件内容；读取或校验失败时为 null */
@@ -79,6 +82,60 @@ function buildChunkCommand(platform: "darwin" | "win32" | "linux", path: string,
     return `printf '__CHUNK__%s\\n' "$(dd if=${quoted} bs=${CHUNK_SIZE} skip=${skip} count=1 2>/dev/null | base64 -b 0)"`;
 }
 
+/**
+ * 把文件 gzip 压缩到临时路径，返回压缩后大小。
+ * dll 这类二进制压缩率很高（实测 7.4 MB -> 1.3 MB），能显著减少终端刷屏与读取时间。
+ */
+async function prepareArchive(path: string): Promise<number> {
+    const quoted = quotePath(path);
+    const archive = quotePath(ARCHIVE_PATH);
+    const result = await runShell(`gzip -c ${quoted} > ${archive} 2>/dev/null; `
+        + `printf '__GZ__%s\\n' "$(stat -f %z ${archive} 2>/dev/null || stat -c %s ${archive} 2>/dev/null)"`);
+    if (!result.output) return 0;
+    const line = extractMarkedLine(result.output, "__GZ__");
+    const size = Number((line ?? "").replace(/[^0-9]/g, ""));
+    return Number.isFinite(size) && size > 0 ? size : 0;
+}
+
+/** 删除临时压缩包；失败不影响读取结果 */
+async function removeArchive(): Promise<void> {
+    await runShell(`rm -f ${quotePath(ARCHIVE_PATH)}`);
+}
+
+/** 用浏览器内置的解压流还原 gzip 内容 */
+async function gunzip(bytes: Uint8Array): Promise<Uint8Array | null> {
+    try {
+        const buffer = new ArrayBuffer(bytes.length);
+        new Uint8Array(buffer).set(bytes);
+        const stream = new Blob([buffer]).stream().pipeThrough(new DecompressionStream("gzip"));
+        return new Uint8Array(await new Response(stream).arrayBuffer());
+    } catch (e) { // 解压失败按读取失败处理，绝不多半截内容
+        console.warn("[file-content] 解压读取结果失败:", e);
+        return null;
+    }
+}
+
+/** 按块读取指定文件的全部字节；任一块失败返回 null */
+async function readAllChunks(platform: "darwin" | "win32" | "linux", path: string, size: number): Promise<Uint8Array | null> {
+    const chunkCount = Math.ceil(size / CHUNK_SIZE);
+    if (chunkCount > MAX_CHUNKS) return null;
+    const parts: Uint8Array[] = [];
+    let total = 0;
+    for (let skip = 0; skip < chunkCount; skip += 1) {
+        const chunk = await readChunk(platform, path, skip);
+        if (!chunk) return null;
+        parts.push(chunk);
+        total += chunk.length;
+    }
+    const merged = new Uint8Array(total);
+    let offset = 0;
+    for (const part of parts) {
+        merged.set(part, offset);
+        offset += part.length;
+    }
+    return merged;
+}
+
 /** 读取单个块并解码；失败返回 null */
 async function readChunk(platform: "darwin" | "win32" | "linux", path: string, skip: number): Promise<Uint8Array | null> {
     const result = await runShell(buildChunkCommand(platform, path, skip));
@@ -120,29 +177,28 @@ async function readContentInSilentScreen(path: string, size: number): Promise<Sh
     const platform = detectPlatform();
     if (!platform) return { content: null, error: "Reading files through the shell is not supported on this platform." };
 
-    const chunkCount = Math.ceil(size / CHUNK_SIZE);
-    if (chunkCount > MAX_CHUNKS) {
+    if (Math.ceil(size / CHUNK_SIZE) > MAX_CHUNKS) {
         return { content: null, error: "This file is too large to read through the shell." };
     }
 
     const expectedHash = await readExpectedHash(platform, path);
     if (!expectedHash) return { content: null, error: "The shell could not read this file." };
 
-    const parts: Uint8Array[] = [];
-    let total = 0;
-    for (let skip = 0; skip < chunkCount; skip += 1) {
-        const chunk = await readChunk(platform, path, skip);
-        if (!chunk) return { content: null, error: `Reading chunk ${skip + 1}/${chunkCount} failed.` };
-        parts.push(chunk);
-        total += chunk.length;
+    let merged: Uint8Array | null = null;
+    // 非 Windows 平台先压缩再传输：终端输出量能少一个数量级，读取也更快
+    if (platform !== "win32") {
+        const archiveSize = await prepareArchive(path);
+        if (archiveSize > 0) {
+            try {
+                const archived = await readAllChunks(platform, ARCHIVE_PATH, archiveSize);
+                if (archived) merged = await gunzip(archived);
+            } finally {
+                await removeArchive();
+            }
+        }
     }
-
-    const merged = new Uint8Array(total);
-    let offset = 0;
-    for (const part of parts) {
-        merged.set(part, offset);
-        offset += part.length;
-    }
+    if (!merged) merged = await readAllChunks(platform, path, size);
+    if (!merged) return { content: null, error: "The shell could not read this file." };
 
     if (merged.length !== size) {
         return { content: null, error: `The file was read incompletely (${merged.length}/${size} bytes).` };
