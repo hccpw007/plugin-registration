@@ -1,14 +1,20 @@
 /**
- * 程序集（.dll）文件的选择、读取与"最近一次选择"记忆。
+ * 程序集（.dll）文件的选择、读取与"最近选择"记忆。
  *
  * 宿主提供 Power Platform ToolBox 文件系统 API 时走原生对话框：能拿到磁盘路径，
- * 下次打开对话框可直接读回磁盘上的最新内容（重新编译后就地覆盖的场景最实用）。
- * 未提供时降级到浏览器 <input type="file">：拿不到路径，内容只在当前会话有效，
- * 跨会话只能回显文件名等元信息。
+ * 因此可以保留多条历史记录，并在选中任意记录时读回磁盘上的最新内容
+ * （重新编译后就地覆盖的场景最实用）。未提供时降级到浏览器 <input type="file">：
+ * 拿不到路径，内容只在当前会话有效，历史记录只能回显文件名等元信息。
  */
 
-/** localStorage 中保存"最近选择的程序集文件"记录的键名 */
-const RECENT_ASSEMBLY_FILE_KEY = "plugin-registration:recent-assembly-file";
+/** localStorage 中保存"最近选择的程序集文件"列表的键名（数组，最新在前） */
+const RECENT_ASSEMBLY_FILES_KEY = "plugin-registration:recent-assembly-files";
+
+/** 旧版本保存单条记录的键名，读取时作为回退，兼容已存在的历史数据 */
+const LEGACY_RECENT_ASSEMBLY_FILE_KEY = "plugin-registration:recent-assembly-file";
+
+/** 最近文件记录上限，避免 localStorage 无限增长 */
+const MAX_RECENT_ASSEMBLY_FILES = 10;
 
 /** 原生文件对话框的 DLL 过滤条件 */
 const DLL_FILE_FILTERS = [{ name: "Assembly", extensions: ["dll"] }];
@@ -30,7 +36,7 @@ export interface AssemblyFileInfo {
     addedAt: number;
 }
 
-/** 已读取的程序集文件；content 为空表示只拿到元信息、内容不可用 */
+/** 已读取的程序集文件 */
 export interface LoadedAssemblyFile {
     info: AssemblyFileInfo;
     /** Base64 编码的文件内容，可直接提交给 Dataverse */
@@ -90,30 +96,52 @@ export function formatFileTimestamp(timestamp: number): string {
         `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
-/** 读取最近一次选择的文件记录；记录损坏或 localStorage 不可用时按无记录处理 */
-function readRecentRecord(): AssemblyFileInfo | null {
+/** 校验并归一化 localStorage 中的一条记录；无效记录返回 null */
+function normalizeRecord(raw: unknown): AssemblyFileInfo | null {
+    if (!raw || typeof raw !== "object") return null;
+    const record = raw as Partial<AssemblyFileInfo>;
+    if (typeof record.name !== "string" || !record.name) return null;
+    return {
+        path: typeof record.path === "string" ? record.path : "",
+        name: record.name,
+        size: typeof record.size === "number" ? record.size : 0,
+        modifiedAt: typeof record.modifiedAt === "number" ? record.modifiedAt : 0,
+        addedAt: typeof record.addedAt === "number" ? record.addedAt : 0,
+    };
+}
+
+/** 读取最近选择的文件列表（最新在前）；记录损坏或 localStorage 不可用时返回空列表 */
+export function getRecentAssemblyFiles(): AssemblyFileInfo[] {
     try {
-        const raw = localStorage.getItem(RECENT_ASSEMBLY_FILE_KEY);
-        if (!raw) return null;
-        const parsed = JSON.parse(raw) as Partial<AssemblyFileInfo> | null;
-        if (!parsed || typeof parsed.name !== "string") return null;
-        return {
-            path: typeof parsed.path === "string" ? parsed.path : "",
-            name: parsed.name,
-            size: typeof parsed.size === "number" ? parsed.size : 0,
-            modifiedAt: typeof parsed.modifiedAt === "number" ? parsed.modifiedAt : 0,
-            addedAt: typeof parsed.addedAt === "number" ? parsed.addedAt : 0,
-        };
+        const raw = localStorage.getItem(RECENT_ASSEMBLY_FILES_KEY)
+            ?? localStorage.getItem(LEGACY_RECENT_ASSEMBLY_FILE_KEY);
+        if (!raw) return [];
+        const parsed: unknown = JSON.parse(raw);
+        // 旧版本存的是单条对象，按单元素列表处理以兼容升级前的记录
+        const list = Array.isArray(parsed) ? parsed : [parsed];
+        return list
+            .map(normalizeRecord)
+            .filter((record): record is AssemblyFileInfo => record !== null);
     } catch (e) { // 隐私模式或记录损坏：降级为无历史记录，不阻断选文件
         console.warn("[assembly-file] 读取最近选择的文件记录失败:", e);
-        return null;
+        return [];
     }
 }
 
-/** 记录最近一次选择的文件，供下次打开对话框时回显与恢复 */
-function saveRecentAssemblyFile(info: AssemblyFileInfo): void {
+/** 判断两条记录是否指向同一个文件：优先比较磁盘路径，浏览器降级记录退化为比较文件名 */
+function isSameFile(a: AssemblyFileInfo, b: AssemblyFileInfo): boolean {
+    if (a.path && b.path) return a.path.toLowerCase() === b.path.toLowerCase();
+    return a.name.toLowerCase() === b.name.toLowerCase();
+}
+
+/** 把文件记录置为最近使用（同一文件去重并前移），列表长度受上限约束 */
+export function rememberAssemblyFile(info: AssemblyFileInfo): void {
+    const others = getRecentAssemblyFiles().filter((record) => !isSameFile(record, info));
+    const next = [info, ...others].slice(0, MAX_RECENT_ASSEMBLY_FILES);
     try {
-        localStorage.setItem(RECENT_ASSEMBLY_FILE_KEY, JSON.stringify(info));
+        localStorage.setItem(RECENT_ASSEMBLY_FILES_KEY, JSON.stringify(next));
+        // 迁移到列表格式后清掉旧键，避免旧记录一直被回退读取
+        localStorage.removeItem(LEGACY_RECENT_ASSEMBLY_FILE_KEY);
     } catch (e) { // 配额不足时写入失败不影响本次选择，仅损失下次的自动恢复
         console.warn("[assembly-file] 保存最近选择的文件记录失败:", e);
     }
@@ -143,8 +171,23 @@ export async function pickAssemblyFile(): Promise<LoadedAssemblyFile | null> {
     if (!path) return null;
     if (!path.toLowerCase().endsWith(".dll")) throw new Error("Please select a .dll file.");
     const loaded = await readAssemblyFileFromPath(path, Date.now());
-    saveRecentAssemblyFile(loaded.info);
+    rememberAssemblyFile(loaded.info);
     return loaded;
+}
+
+/** 读取某条历史记录对应的磁盘内容；无路径、宿主不支持或文件不存在时返回 null */
+export async function loadAssemblyFile(info: AssemblyFileInfo): Promise<LoadedAssemblyFile | null> {
+    if (!info.path || !isNativeFilePickerAvailable()) return null;
+    try {
+        if (!(await window.toolboxAPI.fileSystem.exists(info.path))) {
+            console.warn("[assembly-file] 历史记录对应的文件已不存在:", info.path);
+            return null;
+        }
+        return await readAssemblyFileFromPath(info.path, info.addedAt);
+    } catch (e) { // 文件被移动、权限不足等：返回 null 由界面提示重新选择
+        console.error("[assembly-file] 读取程序集文件失败:", e);
+        return null;
+    }
 }
 
 /** 浏览器降级路径：读取 <input type="file"> 选中的文件内容（拿不到磁盘路径） */
@@ -157,26 +200,6 @@ export async function readBrowserAssemblyFile(file: File): Promise<LoadedAssembl
         modifiedAt: file.lastModified,
         addedAt: Date.now(),
     };
-    saveRecentAssemblyFile(info);
+    rememberAssemblyFile(info);
     return { info, content: bytesToBase64(bytes) };
-}
-
-/**
- * 恢复最近一次选择的文件。
- * 记录里有路径且宿主支持读取时，直接从磁盘读回最新内容；否则只返回元信息（content 为空）。
- */
-export async function loadRecentAssemblyFile(): Promise<LoadedAssemblyFile | null> {
-    const record = readRecentRecord();
-    if (!record) return null;
-    if (!record.path || !isNativeFilePickerAvailable()) return { info: record, content: "" };
-    try {
-        if (!(await window.toolboxAPI.fileSystem.exists(record.path))) {
-            console.warn("[assembly-file] 上次选择的文件已不存在，需重新选择:", record.path);
-            return { info: record, content: "" };
-        }
-        return await readAssemblyFileFromPath(record.path, record.addedAt);
-    } catch (e) { // 文件被移动、权限不足等：回显元信息让用户重新选择，不打断对话框
-        console.error("[assembly-file] 恢复上次选择的文件失败:", e);
-        return { info: record, content: "" };
-    }
 }

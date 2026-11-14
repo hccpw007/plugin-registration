@@ -4,12 +4,15 @@ import type { PluginAssembly, PluginPackage } from "../models/interfaces";
 import {
     formatFileSize,
     formatFileTimestamp,
+    getRecentAssemblyFiles,
     isNativeFilePickerAvailable,
-    loadRecentAssemblyFile,
+    loadAssemblyFile,
     pickAssemblyFile,
     readBrowserAssemblyFile,
+    rememberAssemblyFile,
 } from "../utils/assembly-file";
-import type { AssemblyFileInfo } from "../utils/assembly-file";
+import type { AssemblyFileInfo, LoadedAssemblyFile } from "../utils/assembly-file";
+import { SearchableSelect } from "./SearchableSelect";
 
 interface RegisterAssemblyDialogProps {
     isOpen: boolean;
@@ -41,9 +44,11 @@ export function RegisterAssemblyDialog({
     const [fileError, setFileError] = useState("");
     /** 当前选中的 DLL 元信息：用于显示文件大小、添加时间与修改时间 */
     const [selectedFile, setSelectedFile] = useState<AssemblyFileInfo | null>(null);
-    /** 当前文件是否由"上次选择"自动恢复，用于提示文件来源 */
+    /** 最近选择过的 DLL 列表（最新在前），用于在多个程序集之间快速切换 */
+    const [recentFiles, setRecentFiles] = useState<AssemblyFileInfo[]>([]);
+    /** 当前文件是否由"最近文件"自动带出，用于提示文件来源 */
     const [restoredFromLast, setRestoredFromLast] = useState(false);
-    /** 正在从磁盘读取文件（选择或恢复上次文件），期间禁用选择入口 */
+    /** 正在从磁盘读取文件（选择或恢复最近文件），期间禁用选择入口 */
     const [readingFile, setReadingFile] = useState(false);
     const fileRef = useRef<HTMLInputElement>(null);
     const nativePickerAvailable = isNativeFilePickerAvailable();
@@ -62,21 +67,30 @@ export function RegisterAssemblyDialog({
         setRestoredFromLast(false);
         if (fileRef.current) fileRef.current.value = "";
 
-        // 自动带出上次选择的 DLL：磁盘上仍存在时直接读回最新内容，
-        // 免去"重新编译后每次都要重新选文件"的重复操作
+        const recent = getRecentAssemblyFiles();
+        setRecentFiles(recent);
+        const latest = recent[0];
+        if (!latest) return;
+
+        // 自动带出最近使用的 DLL：磁盘上仍存在时直接读回最新内容，
+        // 免去"重新编译后每次都要重新选文件"的重复操作，其余记录可在下拉中切换
         let cancelled = false;
         setReadingFile(true);
         void (async () => {
             try {
-                const recent = await loadRecentAssemblyFile();
-                if (cancelled || !recent) return;
-                setSelectedFile(recent.info);
-                if (!recent.content) return; // 文件已删除或宿主无法读取，等用户重新选择
-                setContent(recent.content);
-                setAssemblyName(recent.info.name.replace(/\.dll$/i, ""));
+                const loaded = await loadAssemblyFile(latest);
+                if (cancelled) return;
+                if (!loaded) {
+                    // 文件已移动或删除：只回显记录元信息，等用户重新选择
+                    setSelectedFile(latest);
+                    return;
+                }
+                setSelectedFile(loaded.info);
+                setContent(loaded.content);
+                setAssemblyName(loaded.info.name.replace(/\.dll$/i, ""));
                 setRestoredFromLast(true);
             } catch (e) { // 自动恢复失败不阻断用户手动选择
-                console.error("[RegisterAssemblyDialog] 恢复上次选择的程序集文件失败:", e);
+                console.error("[RegisterAssemblyDialog] 恢复最近使用的程序集文件失败:", e);
             } finally {
                 if (!cancelled) setReadingFile(false);
             }
@@ -87,6 +101,15 @@ export function RegisterAssemblyDialog({
 
     if (!isOpen) return null;
 
+    /** 把读到的文件应用到表单，并同步最近文件列表（记录已由工具层写入） */
+    const applyLoadedFile = (loaded: LoadedAssemblyFile, fromRecent: boolean) => {
+        setSelectedFile(loaded.info);
+        setContent(loaded.content);
+        setAssemblyName(loaded.info.name.replace(/\.dll$/i, ""));
+        setRestoredFromLast(fromRecent);
+        setRecentFiles(getRecentAssemblyFiles());
+    };
+
     /** 用宿主原生对话框选择 DLL：能拿到磁盘路径，下次打开对话框可自动恢复内容 */
     const handleBrowseFile = async () => {
         setFileError("");
@@ -94,13 +117,35 @@ export function RegisterAssemblyDialog({
         try {
             const loaded = await pickAssemblyFile();
             if (!loaded) return; // 用户取消了选择
-            setSelectedFile(loaded.info);
-            setContent(loaded.content);
-            setAssemblyName(loaded.info.name.replace(/\.dll$/i, ""));
-            setRestoredFromLast(false);
+            applyLoadedFile(loaded, false);
         } catch (e) {
             console.error("[RegisterAssemblyDialog] 选择程序集文件失败:", e);
             setFileError(e instanceof Error ? e.message : String(e));
+        } finally {
+            setReadingFile(false);
+        }
+    };
+
+    /** 从最近文件列表中选择：读回该 DLL 在磁盘上的当前内容，并把它前移为最近使用 */
+    const handlePickRecentFile = async (path: string) => {
+        const record = recentFiles.find((item) => item.path === path);
+        if (!record) return;
+        setFileError("");
+        setReadingFile(true);
+        try {
+            const loaded = await loadAssemblyFile(record);
+            if (!loaded) {
+                // 文件已移动或删除：回显记录元信息并提示重新选择
+                setSelectedFile(record);
+                setContent("");
+                setRestoredFromLast(false);
+                return;
+            }
+            rememberAssemblyFile(loaded.info);
+            applyLoadedFile(loaded, false);
+        } catch (e) {
+            console.error("[RegisterAssemblyDialog] 读取最近选择的程序集文件失败:", e);
+            setFileError("Failed to read the selected file.");
         } finally {
             setReadingFile(false);
         }
@@ -117,10 +162,7 @@ export function RegisterAssemblyDialog({
         }
         try {
             const loaded = await readBrowserAssemblyFile(file);
-            setSelectedFile(loaded.info);
-            setContent(loaded.content);
-            setAssemblyName(loaded.info.name.replace(/\.dll$/i, ""));
-            setRestoredFromLast(false);
+            applyLoadedFile(loaded, false);
         } catch (e) {
             console.error("[RegisterAssemblyDialog] 读取程序集文件失败:", e);
             setFileError("Failed to read the file.");
@@ -139,6 +181,14 @@ export function RegisterAssemblyDialog({
 
     const title = isUpdate ? `Update Assembly: ${existingAssembly?.name ?? ""}` : "Register New Assembly";
 
+    // 只有带磁盘路径的记录才能读回内容，浏览器降级记录不进"最近文件"下拉
+    const recentFileOptions = recentFiles
+        .filter((file) => file.path)
+        .map((file) => ({
+            value: file.path,
+            label: `${file.name} — ${formatFileSize(file.size)} · ${formatFileTimestamp(file.modifiedAt)}`,
+        }));
+
     return (
         <div className="dialog-overlay">
             <div className="dialog">
@@ -154,9 +204,21 @@ export function RegisterAssemblyDialog({
                 <div className="dialog-body">
                     <div className="form-row">
                         <label className="form-label">Assembly File (.dll) *</label>
-                        {/* 宿主支持原生对话框时用 Browse 按钮（可记住路径）；否则回退到原生 file input */}
+                        {/* 宿主支持原生对话框时用「最近文件 + Browse」入口；否则回退到原生 file input */}
                         {nativePickerAvailable ? (
-                            !selectedFile && (
+                            <div className="form-row-with-browse">
+                                {/* 最近文件：可直接切到历史中用过的其他 DLL，支持输入筛选 */}
+                                {recentFileOptions.length > 0 && (
+                                    <SearchableSelect
+                                        value={selectedFile?.path ?? ""}
+                                        options={recentFileOptions}
+                                        onChange={(path) => void handlePickRecentFile(path)}
+                                        placeholder="Choose a recent file…"
+                                        emptyText="No recent files"
+                                        disabled={saving || readingFile}
+                                    />
+                                )}
+                                {/* 浏览磁盘上的其他 DLL */}
                                 <button
                                     type="button"
                                     className="btn-browse"
@@ -165,7 +227,7 @@ export function RegisterAssemblyDialog({
                                 >
                                     {readingFile ? "Loading…" : "Browse…"}
                                 </button>
-                            )
+                            </div>
                         ) : (
                             <input
                                 ref={fileRef}
@@ -189,22 +251,11 @@ export function RegisterAssemblyDialog({
                                         {" · Modified "}{formatFileTimestamp(selectedFile.modifiedAt)}
                                     </span>
                                 </div>
-                                {/* 更换文件：重新打开系统文件对话框 */}
-                                {nativePickerAvailable && (
-                                    <button
-                                        type="button"
-                                        className="btn-browse"
-                                        onClick={() => void handleBrowseFile()}
-                                        disabled={saving || readingFile}
-                                    >
-                                        Change…
-                                    </button>
-                                )}
                             </div>
                         )}
-                        {/* 自动恢复的文件标注来源，避免用户以为文件是凭空出现的 */}
+                        {/* 自动带出的文件标注来源，避免用户以为文件是凭空出现的 */}
                         {restoredFromLast && (
-                            <div className="form-hint">Loaded automatically from your last selection.</div>
+                            <div className="form-hint">Loaded automatically from your recent files.</div>
                         )}
                         {/* 只拿到元信息（文件已删除或宿主不支持读取）时提示重新选择 */}
                         {selectedFile && !content && (

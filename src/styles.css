@@ -972,6 +972,12 @@ button:disabled {
     min-width: 0;
 }
 
+/* 可搜索下拉与 Browse 按钮并排时同样占据剩余宽度 */
+.form-row-with-browse .searchable-select {
+    flex: 1;
+    min-width: 0;
+}
+
 .btn-browse {
     flex-shrink: 0;
     padding: 5px 10px;
