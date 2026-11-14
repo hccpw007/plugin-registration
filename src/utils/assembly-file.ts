@@ -1,10 +1,9 @@
 /**
- * 程序集（.dll）文件的选择、读取与"最近选择"记忆。
+ * 程序集（.dll）文件的选择、读取与"最近文件"记忆。
  *
- * 宿主提供 Power Platform ToolBox 文件系统 API 时走原生对话框：能拿到磁盘路径，
- * 因此可以保留多条历史记录，并在选中任意记录时读回磁盘上的最新内容
- * （重新编译后就地覆盖的场景最实用）。未提供时降级到浏览器 <input type="file">：
- * 拿不到路径，内容只在当前会话有效，历史记录只能回显文件名等元信息。
+ * 持久化只保存磁盘路径与最近使用时间：文件大小、修改时间在每次打开对话框时从磁盘实时读取，
+ * 已不存在的记录会被自动清理，避免展示过期数据。
+ * 浏览器降级路径（<input type="file">）拿不到路径，既无法跨会话恢复内容，也不写入最近文件历史。
  */
 
 /** localStorage 中保存"最近选择的程序集文件"列表的键名（数组，最新在前） */
@@ -22,18 +21,26 @@ const DLL_FILE_FILTERS = [{ name: "Assembly", extensions: ["dll"] }];
 /** 单次拼接的字节块大小，避免 String.fromCharCode 参数过长导致调用栈溢出 */
 const BASE64_CHUNK_SIZE = 0x8000;
 
-/** 已选程序集文件的元信息 */
+/** 已选程序集文件的元信息；除 path 外均由磁盘实时读取或本次操作产生，不落盘 */
 export interface AssemblyFileInfo {
-    /** 磁盘绝对路径；浏览器降级选择时为空串 */
+    /** 磁盘绝对路径 */
     path: string;
     /** 文件名，含 .dll 扩展名 */
     name: string;
-    /** 文件字节大小 */
+    /** 文件字节大小（实时读取） */
     size: number;
-    /** 文件最后修改时间（毫秒时间戳） */
+    /** 文件最后修改时间（实时读取，毫秒时间戳） */
     modifiedAt: number;
-    /** 该文件加入表单的时间（毫秒时间戳） */
+    /** 该文件加入当前表单的时间（毫秒时间戳） */
     addedAt: number;
+}
+
+/** 持久化的最近文件记录：只保存路径与最近使用时间 */
+interface RecentAssemblyFileRecord {
+    /** 磁盘绝对路径 */
+    path: string;
+    /** 最近一次被选用的时间，用于排序（毫秒时间戳） */
+    lastUsedAt: number;
 }
 
 /** 已读取的程序集文件 */
@@ -47,7 +54,9 @@ export interface LoadedAssemblyFile {
 export function isNativeFilePickerAvailable(): boolean {
     // 类型声明把 fileSystem 标为必选，但浏览器预览环境下整个 toolboxAPI 都不存在，故按运行时探测
     const fileSystem = window.toolboxAPI?.fileSystem;
-    return typeof fileSystem?.selectPath === "function" && typeof fileSystem?.readBinary === "function";
+    return typeof fileSystem?.selectPath === "function"
+        && typeof fileSystem?.readBinary === "function"
+        && typeof fileSystem?.stat === "function";
 }
 
 /** 从路径中取出文件名 */
@@ -96,22 +105,20 @@ export function formatFileTimestamp(timestamp: number): string {
         `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
-/** 校验并归一化 localStorage 中的一条记录；无效记录返回 null */
-function normalizeRecord(raw: unknown): AssemblyFileInfo | null {
+/** 校验并归一化存储中的一条记录；无磁盘路径的记录（旧版浏览器选择）无法复用，返回 null */
+function normalizeRecord(raw: unknown): RecentAssemblyFileRecord | null {
     if (!raw || typeof raw !== "object") return null;
-    const record = raw as Partial<AssemblyFileInfo>;
-    if (typeof record.name !== "string" || !record.name) return null;
-    return {
-        path: typeof record.path === "string" ? record.path : "",
-        name: record.name,
-        size: typeof record.size === "number" ? record.size : 0,
-        modifiedAt: typeof record.modifiedAt === "number" ? record.modifiedAt : 0,
-        addedAt: typeof record.addedAt === "number" ? record.addedAt : 0,
-    };
+    const record = raw as { path?: unknown; lastUsedAt?: unknown; addedAt?: unknown };
+    const path = typeof record.path === "string" ? record.path : "";
+    if (!path) return null;
+    // lastUsedAt 为当前格式；addedAt 来自旧版记录，取其选择时间维持排序
+    const lastUsedAt = typeof record.lastUsedAt === "number" ? record.lastUsedAt
+        : typeof record.addedAt === "number" ? record.addedAt : 0;
+    return { path, lastUsedAt };
 }
 
-/** 读取最近选择的文件列表（最新在前）；记录损坏或 localStorage 不可用时返回空列表 */
-export function getRecentAssemblyFiles(): AssemblyFileInfo[] {
+/** 读取最近文件记录（最新在前）；记录损坏或 localStorage 不可用时返回空列表 */
+function readRecentRecords(): RecentAssemblyFileRecord[] {
     try {
         const raw = localStorage.getItem(RECENT_ASSEMBLY_FILES_KEY)
             ?? localStorage.getItem(LEGACY_RECENT_ASSEMBLY_FILE_KEY);
@@ -121,25 +128,21 @@ export function getRecentAssemblyFiles(): AssemblyFileInfo[] {
         const list = Array.isArray(parsed) ? parsed : [parsed];
         return list
             .map(normalizeRecord)
-            .filter((record): record is AssemblyFileInfo => record !== null);
+            .filter((record): record is RecentAssemblyFileRecord => record !== null);
     } catch (e) { // 隐私模式或记录损坏：降级为无历史记录，不阻断选文件
         console.warn("[assembly-file] 读取最近选择的文件记录失败:", e);
         return [];
     }
 }
 
-/** 判断两条记录是否指向同一个文件：优先比较磁盘路径，浏览器降级记录退化为比较文件名 */
-function isSameFile(a: AssemblyFileInfo, b: AssemblyFileInfo): boolean {
-    if (a.path && b.path) return a.path.toLowerCase() === b.path.toLowerCase();
-    return a.name.toLowerCase() === b.name.toLowerCase();
-}
-
-/** 把文件记录置为最近使用（同一文件去重并前移），列表长度受上限约束 */
-export function rememberAssemblyFile(info: AssemblyFileInfo): void {
-    const others = getRecentAssemblyFiles().filter((record) => !isSameFile(record, info));
-    const next = [info, ...others].slice(0, MAX_RECENT_ASSEMBLY_FILES);
+/** 写回最近文件记录；空列表时清除存储，避免残留空数组 */
+function writeRecentRecords(records: RecentAssemblyFileRecord[]): void {
     try {
-        localStorage.setItem(RECENT_ASSEMBLY_FILES_KEY, JSON.stringify(next));
+        if (records.length === 0) {
+            localStorage.removeItem(RECENT_ASSEMBLY_FILES_KEY);
+        } else {
+            localStorage.setItem(RECENT_ASSEMBLY_FILES_KEY, JSON.stringify(records));
+        }
         // 迁移到列表格式后清掉旧键，避免旧记录一直被回退读取
         localStorage.removeItem(LEGACY_RECENT_ASSEMBLY_FILE_KEY);
     } catch (e) { // 配额不足时写入失败不影响本次选择，仅损失下次的自动恢复
@@ -147,16 +150,67 @@ export function rememberAssemblyFile(info: AssemblyFileInfo): void {
     }
 }
 
-/** 通过宿主文件系统 API 读取指定路径的 DLL；addedAt 为"加入表单"的时间 */
-async function readAssemblyFileFromPath(path: string, addedAt: number): Promise<LoadedAssemblyFile> {
+/** 把文件置为最近使用（同一路径去重并前移），只记录路径与使用时间 */
+export function rememberAssemblyFile(path: string, usedAt: number): void {
+    const others = readRecentRecords().filter((record) => record.path.toLowerCase() !== path.toLowerCase());
+    writeRecentRecords([{ path, lastUsedAt: usedAt }, ...others].slice(0, MAX_RECENT_ASSEMBLY_FILES));
+}
+
+/**
+ * 按磁盘实时状态校验最近文件列表：大小与修改时间重新读取，已不存在的记录直接清理。
+ * 宿主不支持读取磁盘时无法校验，返回空列表并清除历史。
+ */
+export async function refreshRecentAssemblyFiles(): Promise<AssemblyFileInfo[]> {
+    const records = readRecentRecords();
+    if (records.length === 0) return [];
+    if (!isNativeFilePickerAvailable()) {
+        writeRecentRecords([]);
+        return [];
+    }
+
+    const fileSystem = window.toolboxAPI.fileSystem;
+    const verified = await Promise.all<AssemblyFileInfo | null>(records.map(async (record) => {
+        try {
+            const stat = await fileSystem.stat(record.path);
+            if (stat.type !== "file") return null;
+            const modifiedAt = Date.parse(stat.mtime);
+            return {
+                path: record.path,
+                name: fileNameOf(record.path),
+                size: stat.size,
+                // mtime 解析失败时退化为 0，界面显示为未修改时间
+                modifiedAt: Number.isNaN(modifiedAt) ? 0 : modifiedAt,
+                addedAt: record.lastUsedAt,
+            };
+        } catch (e) { // 文件已被删除或移动：从最近文件列表中清理
+            console.warn("[assembly-file] 最近文件已不可用，将被移除:", record.path, e);
+            return null;
+        }
+    }));
+
+    const existing = verified.filter((item): item is AssemblyFileInfo => item !== null);
+    if (existing.length !== records.length) {
+        writeRecentRecords(existing.map((item) => ({ path: item.path, lastUsedAt: item.addedAt })));
+    }
+    return existing;
+}
+
+/** 通过宿主文件系统 API 读取指定路径的 DLL，大小与修改时间实时取自磁盘 */
+async function readAssemblyFileFromPath(path: string): Promise<LoadedAssemblyFile> {
     const fileSystem = window.toolboxAPI.fileSystem;
     const stat = await fileSystem.stat(path);
     if (stat.type !== "file") throw new Error("The selected path is not a file.");
     const payload: unknown = await fileSystem.readBinary(path);
     const modifiedAt = Date.parse(stat.mtime);
     return {
-        // mtime 解析失败时退化为"当前时间"，避免界面显示 Invalid Date
-        info: { path, name: fileNameOf(path), size: stat.size, modifiedAt: Number.isNaN(modifiedAt) ? Date.now() : modifiedAt, addedAt },
+        // mtime 解析失败时退化为 0；addedAt 取读取时刻，即本次加入表单的时间
+        info: {
+            path,
+            name: fileNameOf(path),
+            size: stat.size,
+            modifiedAt: Number.isNaN(modifiedAt) ? 0 : modifiedAt,
+            addedAt: Date.now(),
+        },
         content: bytesToBase64(toBytes(payload)),
     };
 }
@@ -170,21 +224,17 @@ export async function pickAssemblyFile(): Promise<LoadedAssemblyFile | null> {
     });
     if (!path) return null;
     if (!path.toLowerCase().endsWith(".dll")) throw new Error("Please select a .dll file.");
-    const loaded = await readAssemblyFileFromPath(path, Date.now());
-    rememberAssemblyFile(loaded.info);
+    const loaded = await readAssemblyFileFromPath(path);
+    rememberAssemblyFile(path, loaded.info.addedAt);
     return loaded;
 }
 
-/** 读取某条历史记录对应的磁盘内容；无路径、宿主不支持或文件不存在时返回 null */
-export async function loadAssemblyFile(info: AssemblyFileInfo): Promise<LoadedAssemblyFile | null> {
-    if (!info.path || !isNativeFilePickerAvailable()) return null;
+/** 读取某个历史路径对应的磁盘内容；宿主不支持或文件已不存在时返回 null */
+export async function loadAssemblyFile(path: string): Promise<LoadedAssemblyFile | null> {
+    if (!path || !isNativeFilePickerAvailable()) return null;
     try {
-        if (!(await window.toolboxAPI.fileSystem.exists(info.path))) {
-            console.warn("[assembly-file] 历史记录对应的文件已不存在:", info.path);
-            return null;
-        }
-        return await readAssemblyFileFromPath(info.path, info.addedAt);
-    } catch (e) { // 文件被移动、权限不足等：返回 null 由界面提示重新选择
+        return await readAssemblyFileFromPath(path);
+    } catch (e) { // 文件被删除、移动或权限不足：返回 null 由界面清理该记录并提示重新选择
         console.error("[assembly-file] 读取程序集文件失败:", e);
         return null;
     }
@@ -200,6 +250,5 @@ export async function readBrowserAssemblyFile(file: File): Promise<LoadedAssembl
         modifiedAt: file.lastModified,
         addedAt: Date.now(),
     };
-    rememberAssemblyFile(info);
     return { info, content: bytesToBase64(bytes) };
 }

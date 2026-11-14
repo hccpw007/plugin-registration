@@ -4,11 +4,11 @@ import type { PluginAssembly, PluginPackage } from "../models/interfaces";
 import {
     formatFileSize,
     formatFileTimestamp,
-    getRecentAssemblyFiles,
     isNativeFilePickerAvailable,
     loadAssemblyFile,
     pickAssemblyFile,
     readBrowserAssemblyFile,
+    refreshRecentAssemblyFiles,
     rememberAssemblyFile,
 } from "../utils/assembly-file";
 import type { AssemblyFileInfo, LoadedAssemblyFile } from "../utils/assembly-file";
@@ -67,21 +67,21 @@ export function RegisterAssemblyDialog({
         setRestoredFromLast(false);
         if (fileRef.current) fileRef.current.value = "";
 
-        const recent = getRecentAssemblyFiles();
-        setRecentFiles(recent);
-        const latest = recent[0];
-        if (!latest) return;
-
-        // 自动带出最近使用的 DLL：磁盘上仍存在时直接读回最新内容，
-        // 免去"重新编译后每次都要重新选文件"的重复操作，其余记录可在下拉中切换
+        // 自动带出最近使用的 DLL：历史记录先按磁盘实时状态校验（大小/修改时间重新读取，
+        // 已不存在的记录被清理），再把最近一条读回内存，免去每次重新选文件
         let cancelled = false;
         setReadingFile(true);
         void (async () => {
             try {
-                const loaded = await loadAssemblyFile(latest);
+                const files = await refreshRecentAssemblyFiles();
+                if (cancelled) return;
+                setRecentFiles(files);
+                const latest = files[0];
+                if (!latest) return;
+                const loaded = await loadAssemblyFile(latest.path);
                 if (cancelled) return;
                 if (!loaded) {
-                    // 文件已移动或删除：只回显记录元信息，等用户重新选择
+                    // 刚校验通过却读取失败（权限等）：只回显记录元信息，等用户重新选择
                     setSelectedFile(latest);
                     return;
                 }
@@ -89,7 +89,7 @@ export function RegisterAssemblyDialog({
                 setContent(loaded.content);
                 setAssemblyName(loaded.info.name.replace(/\.dll$/i, ""));
                 setRestoredFromLast(true);
-            } catch (e) { // 自动恢复失败不阻断用户手动选择
+            } catch (e) { // 恢复失败不阻断用户手动选择
                 console.error("[RegisterAssemblyDialog] 恢复最近使用的程序集文件失败:", e);
             } finally {
                 if (!cancelled) setReadingFile(false);
@@ -101,13 +101,13 @@ export function RegisterAssemblyDialog({
 
     if (!isOpen) return null;
 
-    /** 把读到的文件应用到表单，并同步最近文件列表（记录已由工具层写入） */
-    const applyLoadedFile = (loaded: LoadedAssemblyFile, fromRecent: boolean) => {
+    /** 把读到的文件应用到表单，并按磁盘实时状态刷新最近文件列表 */
+    const applyLoadedFile = async (loaded: LoadedAssemblyFile, fromRecent: boolean) => {
         setSelectedFile(loaded.info);
         setContent(loaded.content);
         setAssemblyName(loaded.info.name.replace(/\.dll$/i, ""));
         setRestoredFromLast(fromRecent);
-        setRecentFiles(getRecentAssemblyFiles());
+        setRecentFiles(await refreshRecentAssemblyFiles());
     };
 
     /** 用宿主原生对话框选择 DLL：能拿到磁盘路径，下次打开对话框可自动恢复内容 */
@@ -117,7 +117,7 @@ export function RegisterAssemblyDialog({
         try {
             const loaded = await pickAssemblyFile();
             if (!loaded) return; // 用户取消了选择
-            applyLoadedFile(loaded, false);
+            await applyLoadedFile(loaded, false);
         } catch (e) {
             console.error("[RegisterAssemblyDialog] 选择程序集文件失败:", e);
             setFileError(e instanceof Error ? e.message : String(e));
@@ -128,21 +128,19 @@ export function RegisterAssemblyDialog({
 
     /** 从最近文件列表中选择：读回该 DLL 在磁盘上的当前内容，并把它前移为最近使用 */
     const handlePickRecentFile = async (path: string) => {
-        const record = recentFiles.find((item) => item.path === path);
-        if (!record) return;
         setFileError("");
         setReadingFile(true);
         try {
-            const loaded = await loadAssemblyFile(record);
+            const loaded = await loadAssemblyFile(path);
             if (!loaded) {
-                // 文件已移动或删除：回显记录元信息并提示重新选择
-                setSelectedFile(record);
-                setContent("");
-                setRestoredFromLast(false);
+                // 文件已不存在：清理该记录并提示改选，当前已加载的文件保持不变
+                setRecentFiles(await refreshRecentAssemblyFiles());
+                setFileError("This file is no longer available. Choose another file.");
                 return;
             }
-            rememberAssemblyFile(loaded.info);
-            applyLoadedFile(loaded, false);
+            // 选中的文件前移为最近使用，addedAt 为本次加入表单的时间
+            rememberAssemblyFile(path, loaded.info.addedAt);
+            await applyLoadedFile(loaded, false);
         } catch (e) {
             console.error("[RegisterAssemblyDialog] 读取最近选择的程序集文件失败:", e);
             setFileError("Failed to read the selected file.");
@@ -162,7 +160,7 @@ export function RegisterAssemblyDialog({
         }
         try {
             const loaded = await readBrowserAssemblyFile(file);
-            applyLoadedFile(loaded, false);
+            await applyLoadedFile(loaded, false);
         } catch (e) {
             console.error("[RegisterAssemblyDialog] 读取程序集文件失败:", e);
             setFileError("Failed to read the file.");
