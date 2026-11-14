@@ -189,6 +189,10 @@ export default function App() {
     const [searchTerm, setSearchTerm] = useState("");
     // 搜索期间被用户手动折叠的节点：搜索结果默认展开，但仍需允许逐个收起
     const [searchCollapsedIds, setSearchCollapsedIds] = useState<Set<string>>(new Set());
+    // 搜索时补齐未展开程序集的插件类型，加载期间用于提示而不是直接显示"No results"
+    const [searchingPlugins, setSearchingPlugins] = useState(false);
+    // 本轮回读中已尝试过的程序集：加载失败的不再重复请求，避免反复触发与死循环
+    const attemptedPluginFetchRef = useRef<Set<string>>(new Set());
 
     // Filter toggles
     const [showPlugins, setShowPlugins] = useState(true);
@@ -259,6 +263,9 @@ export default function App() {
         setEndpointSteps(new Map());
         setSelectedNode(null);
         setExpandedIds(new Set());
+        setSearchingPlugins(false);
+        // 刷新后允许重新补齐插件类型（上一轮失败的也会再试一次）
+        attemptedPluginFetchRef.current = new Set();
         // The managed identity lookup only exists where the managedidentity table does, so check first
         const miSupported = await client.isManagedIdentitySupported();
         setManagedIdentitySupported(miSupported);
@@ -299,6 +306,44 @@ export default function App() {
             void loadAll();
         }
     }, [isPPTB, loadAll]);
+
+    // 未展开过的程序集不会加载插件类型，直接搜索就会漏掉其中的 plugin；
+    // 输入搜索词时补齐所有程序集的插件类型，按小批并发避免一次打满 Dataverse 请求限制
+    useEffect(() => {
+        if (!isPPTB || !searchTerm.trim()) return;
+        const pending = assemblies.filter(
+            (asm) => !pluginTypes.has(asm.pluginassemblyid) && !attemptedPluginFetchRef.current.has(asm.pluginassemblyid),
+        );
+        if (pending.length === 0) return;
+
+        // 先登记再请求：加载失败的也记为已尝试，避免依赖变化时反复触发
+        pending.forEach((asm) => attemptedPluginFetchRef.current.add(asm.pluginassemblyid));
+        setSearchingPlugins(true);
+        void (async () => {
+            const BATCH_SIZE = 5;
+            for (let index = 0; index < pending.length; index += BATCH_SIZE) {
+                const batch = pending.slice(index, index + BATCH_SIZE);
+                const results = await Promise.allSettled(
+                    batch.map((asm) => client.fetchPluginTypes(asm.pluginassemblyid)),
+                );
+                setPluginTypes((prev: Map<string, PluginType[]>) => {
+                    const next = new Map(prev);
+                    results.forEach((result, i) => {
+                        if (result.status === "fulfilled") {
+                            next.set(batch[i].pluginassemblyid, result.value);
+                        }
+                    });
+                    return next;
+                });
+                results.forEach((result, i) => {
+                    if (result.status === "rejected") {
+                        console.error(`[search] 加载程序集 ${batch[i].name} 的插件类型失败:`, result.reason);
+                    }
+                });
+            }
+            setSearchingPlugins(false);
+        })();
+    }, [isPPTB, searchTerm, assemblies, pluginTypes]);
 
     // Load children data when a node is selected (for bottom grid)
     const handleSelectNode = useCallback(
@@ -1411,7 +1456,9 @@ export default function App() {
                         onDoubleClickNode={handleDoubleClickNode}
                         emptyMessage={
                             searchTerm
-                                ? `No results for "${searchTerm}"`
+                                ? searchingPlugins
+                                    ? `Loading plugin types to search "${searchTerm}"…`
+                                    : `No results for "${searchTerm}"`
                                 : "No assemblies found. Click Register → New Assembly to add one."
                         }
                     />
