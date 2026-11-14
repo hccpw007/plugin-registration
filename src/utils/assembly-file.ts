@@ -154,12 +154,16 @@ async function readAssemblyFileFromPath(path: string): Promise<LoadedAssemblyFil
     };
 }
 
-/** 打开原生文件对话框选择 DLL 并读取内容；用户取消时返回 null */
-export async function pickAssemblyFile(scope: string): Promise<LoadedAssemblyFile | null> {
+/**
+ * 打开原生文件对话框选择 DLL 并读取内容；用户取消时返回 null。
+ * defaultPath 用于把对话框定位到上次选中的文件所在目录，重新选择时不必再逐层翻目录。
+ */
+export async function pickAssemblyFile(scope: string, defaultPath?: string): Promise<LoadedAssemblyFile | null> {
     const path = await window.toolboxAPI.fileSystem.selectPath({
         type: "file",
         title: "Select Assembly File",
         filters: DLL_FILE_FILTERS,
+        defaultPath,
     });
     if (!path) return null;
     if (!path.toLowerCase().endsWith(".dll")) throw new Error("Please select a .dll file.");

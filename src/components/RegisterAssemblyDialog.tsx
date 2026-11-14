@@ -49,8 +49,8 @@ export function RegisterAssemblyDialog({
     const [recentFiles, setRecentFiles] = useState<AssemblyFileInfo[]>([]);
     /** 当前文件是否由"最近文件"自动带出，用于提示文件来源 */
     const [restoredFromLast, setRestoredFromLast] = useState(false);
-    /** 当前内容来自本地缓存（宿主重启后无法再读磁盘时），提示用户缓存可能过期 */
-    const [restoredFromCache, setRestoredFromCache] = useState(false);
+    /** 缓存快照的保存时间；内容不是来自缓存时为 null，界面据此标注来源 */
+    const [cachedCopyAt, setCachedCopyAt] = useState<number | null>(null);
     /** 正在从磁盘读取文件（选择或恢复最近文件），期间禁用选择入口 */
     const [readingFile, setReadingFile] = useState(false);
     const fileRef = useRef<HTMLInputElement>(null);
@@ -71,7 +71,7 @@ export function RegisterAssemblyDialog({
         setFileError("");
         setSelectedFile(null);
         setRestoredFromLast(false);
-        setRestoredFromCache(false);
+        setCachedCopyAt(null);
         if (fileRef.current) fileRef.current.value = "";
 
         // 自动带出该程序集最近使用的 DLL：历史记录先按磁盘实时状态校验（大小/修改时间重新读取，
@@ -115,7 +115,7 @@ export function RegisterAssemblyDialog({
                 setContent(cached.content);
                 setAssemblyName(cached.name.replace(/\.dll$/i, ""));
                 setRestoredFromLast(true);
-                setRestoredFromCache(true);
+                setCachedCopyAt(cached.cachedAt);
             } catch (e) { // 恢复失败不阻断用户手动选择
                 console.error("[RegisterAssemblyDialog] 恢复最近使用的程序集文件失败:", e);
             } finally {
@@ -134,7 +134,7 @@ export function RegisterAssemblyDialog({
         setContent(loaded.content);
         setAssemblyName(loaded.info.name.replace(/\.dll$/i, ""));
         setRestoredFromLast(fromRecent);
-        setRestoredFromCache(false);
+        setCachedCopyAt(null);
         // 更新本地缓存：宿主重启后若无法再读磁盘，用这份内容回退
         void saveCachedAssemblyFile(fileScope, loaded);
         setRecentFiles(await refreshRecentAssemblyFiles(fileScope));
@@ -145,7 +145,7 @@ export function RegisterAssemblyDialog({
         setFileError("");
         setReadingFile(true);
         try {
-            const loaded = await pickAssemblyFile(fileScope);
+            const loaded = await pickAssemblyFile(fileScope, selectedFile?.path);
             if (!loaded) return; // 用户取消了选择
             await applyLoadedFile(loaded, false);
         } catch (e) {
@@ -177,7 +177,7 @@ export function RegisterAssemblyDialog({
                     setContent(cached.content);
                     setAssemblyName(cached.name.replace(/\.dll$/i, ""));
                     setRestoredFromLast(false);
-                    setRestoredFromCache(true);
+                    setCachedCopyAt(cached.cachedAt);
                     return;
                 }
                 // 读取失败：重新校验列表（refresh 只清理确认不存在的记录），当前文件保持不变
@@ -298,20 +298,23 @@ export function RegisterAssemblyDialog({
                                     <span className="file-info-meta">
                                         {selectedFile.size > 0 ? formatFileSize(selectedFile.size) : "Size unavailable"}
                                         {" · Added "}{formatDateTime(selectedFile.addedAt)}
-                                        {selectedFile.modifiedAt > 0 && ` · Modified ${formatDateTime(selectedFile.modifiedAt)}`}
+                                        {/* 缓存副本的大小与修改时间停留在缓存那一刻，不能当作文件现状展示 */}
+                                        {cachedCopyAt === null
+                                            ? selectedFile.modifiedAt > 0 && ` · Modified ${formatDateTime(selectedFile.modifiedAt)}`
+                                            : ` · Cached copy from ${formatDateTime(cachedCopyAt)}`}
                                     </span>
                                 </div>
                             </div>
                         )}
                         {/* 自动带出的文件标注来源，避免用户以为文件是凭空出现的 */}
-                        {restoredFromLast && !restoredFromCache && (
+                        {restoredFromLast && cachedCopyAt === null && (
                             <div className="form-hint">Loaded automatically from your recent files.</div>
                         )}
-                        {/* 宿主重启后无法再读磁盘，内容来自上次的缓存副本：明确提示可能已过期 */}
-                        {restoredFromCache && (
+                        {/* 宿主重启后文件访问授权失效，内容来自缓存副本：明确说明读不到文件当前状态 */}
+                        {cachedCopyAt !== null && (
                             <div className="form-hint form-hint-warning">
-                                Loaded from the cached copy saved when you last selected this file. If you rebuilt the dll,
-                                use Browse to re-select it.
+                                Power Platform ToolBox cannot read this path after a restart, so the file's current size
+                                and modified time are unknown. Use Browse to re-select it — the dialog opens at the last folder.
                             </div>
                         )}
                         {/* 只拿到元信息（文件已删除或宿主不支持读取）时提示重新选择 */}
