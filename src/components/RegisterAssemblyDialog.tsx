@@ -9,8 +9,8 @@ import {
     pickAssemblyFile,
     readBrowserAssemblyFile,
     refreshRecentAssemblyFiles,
-    rememberAssemblyFile,
 } from "../utils/assembly-file";
+import { NEW_ASSEMBLY_FILE_SCOPE, rememberAssemblyFile } from "../utils/assembly-file-history";
 import type { AssemblyFileInfo, LoadedAssemblyFile } from "../utils/assembly-file";
 import { SearchableSelect } from "./SearchableSelect";
 
@@ -52,6 +52,9 @@ export function RegisterAssemblyDialog({
     const [readingFile, setReadingFile] = useState(false);
     const fileRef = useRef<HTMLInputElement>(null);
     const nativePickerAvailable = isNativeFilePickerAvailable();
+    // 最近文件按程序集分开记忆：更新时用程序集 id，注册新程序集时用固定分组，
+    // 避免把一个程序集的 dll 带到另一个程序集上
+    const fileScope = existingAssembly?.pluginassemblyid ?? NEW_ASSEMBLY_FILE_SCOPE;
 
     // Reset form state whenever the dialog opens or the target assembly changes
     useEffect(() => {
@@ -67,13 +70,13 @@ export function RegisterAssemblyDialog({
         setRestoredFromLast(false);
         if (fileRef.current) fileRef.current.value = "";
 
-        // 自动带出最近使用的 DLL：历史记录先按磁盘实时状态校验（大小/修改时间重新读取，
+        // 自动带出该程序集最近使用的 DLL：历史记录先按磁盘实时状态校验（大小/修改时间重新读取，
         // 已不存在的记录被清理），再把最近一条读回内存，免去每次重新选文件
         let cancelled = false;
         setReadingFile(true);
         void (async () => {
             try {
-                const files = await refreshRecentAssemblyFiles();
+                const files = await refreshRecentAssemblyFiles(fileScope);
                 if (cancelled) return;
                 setRecentFiles(files);
                 const latest = files[0];
@@ -97,7 +100,7 @@ export function RegisterAssemblyDialog({
         })();
 
         return () => { cancelled = true; };
-    }, [isOpen, existingAssembly]);
+    }, [isOpen, existingAssembly, fileScope]);
 
     if (!isOpen) return null;
 
@@ -107,7 +110,7 @@ export function RegisterAssemblyDialog({
         setContent(loaded.content);
         setAssemblyName(loaded.info.name.replace(/\.dll$/i, ""));
         setRestoredFromLast(fromRecent);
-        setRecentFiles(await refreshRecentAssemblyFiles());
+        setRecentFiles(await refreshRecentAssemblyFiles(fileScope));
     };
 
     /** 用宿主原生对话框选择 DLL：能拿到磁盘路径，下次打开对话框可自动恢复内容 */
@@ -115,7 +118,7 @@ export function RegisterAssemblyDialog({
         setFileError("");
         setReadingFile(true);
         try {
-            const loaded = await pickAssemblyFile();
+            const loaded = await pickAssemblyFile(fileScope);
             if (!loaded) return; // 用户取消了选择
             await applyLoadedFile(loaded, false);
         } catch (e) {
@@ -134,12 +137,12 @@ export function RegisterAssemblyDialog({
             const loaded = await loadAssemblyFile(path);
             if (!loaded) {
                 // 读取失败：重新校验列表（refresh 只清理确认不存在的记录），当前文件保持不变
-                setRecentFiles(await refreshRecentAssemblyFiles());
+                setRecentFiles(await refreshRecentAssemblyFiles(fileScope));
                 setFileError("Unable to read this file. Choose another file.");
                 return;
             }
             // 选中的文件前移为最近使用，addedAt 为本次加入表单的时间
-            rememberAssemblyFile(path, loaded.info.addedAt);
+            rememberAssemblyFile(fileScope, path, loaded.info.addedAt);
             await applyLoadedFile(loaded, false);
         } catch (e) {
             console.error("[RegisterAssemblyDialog] 读取最近选择的程序集文件失败:", e);

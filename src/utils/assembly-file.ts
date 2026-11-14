@@ -1,19 +1,12 @@
 /**
  * 程序集（.dll）文件的选择、读取与"最近文件"记忆。
  *
- * 持久化只保存磁盘路径与最近使用时间：文件大小、修改时间在每次打开对话框时从磁盘实时读取，
- * 已不存在的记录会被自动清理，避免展示过期数据。
- * 浏览器降级路径（<input type="file">）拿不到路径，既无法跨会话恢复内容，也不写入最近文件历史。
+ * 最近文件历史按程序集分组保存在 assembly-file-history 中；本模块负责与宿主文件系统交互：
+ * 选择文件、读取内容，并在每次用到历史记录时按磁盘实时状态校验（大小、修改时间重新读取，
+ * 确认不存在的记录被清理）。浏览器降级路径（<input type="file">）拿不到路径，不写入历史。
  */
 
-/** localStorage 中保存"最近选择的程序集文件"列表的键名（数组，最新在前） */
-const RECENT_ASSEMBLY_FILES_KEY = "plugin-registration:recent-assembly-files";
-
-/** 旧版本保存单条记录的键名，读取时作为回退，兼容已存在的历史数据 */
-const LEGACY_RECENT_ASSEMBLY_FILE_KEY = "plugin-registration:recent-assembly-file";
-
-/** 最近文件记录上限，避免 localStorage 无限增长 */
-const MAX_RECENT_ASSEMBLY_FILES = 10;
+import { readRecentRecords, rememberAssemblyFile, writeRecentRecords } from "./assembly-file-history";
 
 /** 原生文件对话框的 DLL 过滤条件 */
 const DLL_FILE_FILTERS = [{ name: "Assembly", extensions: ["dll"] }];
@@ -33,14 +26,6 @@ export interface AssemblyFileInfo {
     modifiedAt: number;
     /** 该文件加入当前表单的时间（毫秒时间戳） */
     addedAt: number;
-}
-
-/** 持久化的最近文件记录：只保存路径与最近使用时间 */
-interface RecentAssemblyFileRecord {
-    /** 磁盘绝对路径 */
-    path: string;
-    /** 最近一次被选用的时间，用于排序（毫秒时间戳） */
-    lastUsedAt: number;
 }
 
 /** 已读取的程序集文件 */
@@ -97,64 +82,13 @@ export function formatFileSize(bytes: number): string {
     return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unitIndex]}`;
 }
 
-/** 校验并归一化存储中的一条记录；无磁盘路径的记录（旧版浏览器选择）无法复用，返回 null */
-function normalizeRecord(raw: unknown): RecentAssemblyFileRecord | null {
-    if (!raw || typeof raw !== "object") return null;
-    const record = raw as { path?: unknown; lastUsedAt?: unknown; addedAt?: unknown };
-    const path = typeof record.path === "string" ? record.path : "";
-    if (!path) return null;
-    // lastUsedAt 为当前格式；addedAt 来自旧版记录，取其选择时间维持排序
-    const lastUsedAt = typeof record.lastUsedAt === "number" ? record.lastUsedAt
-        : typeof record.addedAt === "number" ? record.addedAt : 0;
-    return { path, lastUsedAt };
-}
-
-/** 读取最近文件记录（最新在前）；记录损坏或 localStorage 不可用时返回空列表 */
-function readRecentRecords(): RecentAssemblyFileRecord[] {
-    try {
-        const raw = localStorage.getItem(RECENT_ASSEMBLY_FILES_KEY)
-            ?? localStorage.getItem(LEGACY_RECENT_ASSEMBLY_FILE_KEY);
-        if (!raw) return [];
-        const parsed: unknown = JSON.parse(raw);
-        // 旧版本存的是单条对象，按单元素列表处理以兼容升级前的记录
-        const list = Array.isArray(parsed) ? parsed : [parsed];
-        return list
-            .map(normalizeRecord)
-            .filter((record): record is RecentAssemblyFileRecord => record !== null);
-    } catch (e) { // 隐私模式或记录损坏：降级为无历史记录，不阻断选文件
-        console.warn("[assembly-file] 读取最近选择的文件记录失败:", e);
-        return [];
-    }
-}
-
-/** 写回最近文件记录；空列表时清除存储，避免残留空数组 */
-function writeRecentRecords(records: RecentAssemblyFileRecord[]): void {
-    try {
-        if (records.length === 0) {
-            localStorage.removeItem(RECENT_ASSEMBLY_FILES_KEY);
-        } else {
-            localStorage.setItem(RECENT_ASSEMBLY_FILES_KEY, JSON.stringify(records));
-        }
-        // 迁移到列表格式后清掉旧键，避免旧记录一直被回退读取
-        localStorage.removeItem(LEGACY_RECENT_ASSEMBLY_FILE_KEY);
-    } catch (e) { // 配额不足时写入失败不影响本次选择，仅损失下次的自动恢复
-        console.warn("[assembly-file] 保存最近选择的文件记录失败:", e);
-    }
-}
-
-/** 把文件置为最近使用（同一路径去重并前移），只记录路径与使用时间 */
-export function rememberAssemblyFile(path: string, usedAt: number): void {
-    const others = readRecentRecords().filter((record) => record.path.toLowerCase() !== path.toLowerCase());
-    writeRecentRecords([{ path, lastUsedAt: usedAt }, ...others].slice(0, MAX_RECENT_ASSEMBLY_FILES));
-}
-
 /**
- * 按磁盘实时状态校验最近文件列表：大小与修改时间重新读取。
+ * 按磁盘实时状态校验指定程序集的最近文件列表：大小与修改时间重新读取。
  * 只有确认文件已不存在（exists 为 false）或路径已不再是文件时才清理记录；
  * 元信息暂时读不到（权限、宿主异常等）时保留记录，避免一次读取异常就丢掉整份历史。
  */
-export async function refreshRecentAssemblyFiles(): Promise<AssemblyFileInfo[]> {
-    const records = readRecentRecords();
+export async function refreshRecentAssemblyFiles(scope: string): Promise<AssemblyFileInfo[]> {
+    const records = readRecentRecords(scope);
     if (records.length === 0) return [];
     // 宿主不支持读取磁盘时无法校验，保留历史记录，避免环境异常时丢数据
     if (!isNativeFilePickerAvailable()) return [];
@@ -195,7 +129,7 @@ export async function refreshRecentAssemblyFiles(): Promise<AssemblyFileInfo[]> 
 
     const existing = verified.filter((item): item is AssemblyFileInfo => item !== null);
     if (existing.length !== records.length) {
-        writeRecentRecords(existing.map((item) => ({ path: item.path, lastUsedAt: item.addedAt })));
+        writeRecentRecords(scope, existing.map((item) => ({ path: item.path, lastUsedAt: item.addedAt })));
     }
     return existing;
 }
@@ -221,7 +155,7 @@ async function readAssemblyFileFromPath(path: string): Promise<LoadedAssemblyFil
 }
 
 /** 打开原生文件对话框选择 DLL 并读取内容；用户取消时返回 null */
-export async function pickAssemblyFile(): Promise<LoadedAssemblyFile | null> {
+export async function pickAssemblyFile(scope: string): Promise<LoadedAssemblyFile | null> {
     const path = await window.toolboxAPI.fileSystem.selectPath({
         type: "file",
         title: "Select Assembly File",
@@ -230,7 +164,8 @@ export async function pickAssemblyFile(): Promise<LoadedAssemblyFile | null> {
     if (!path) return null;
     if (!path.toLowerCase().endsWith(".dll")) throw new Error("Please select a .dll file.");
     const loaded = await readAssemblyFileFromPath(path);
-    rememberAssemblyFile(path, loaded.info.addedAt);
+    // 只记入当前程序集的历史，其他程序集的文件列表不受影响
+    rememberAssemblyFile(scope, path, loaded.info.addedAt);
     return loaded;
 }
 
