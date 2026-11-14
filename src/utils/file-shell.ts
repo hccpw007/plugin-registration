@@ -57,6 +57,16 @@ export async function runShell(command: string): Promise<ShellResult> {
     }
 }
 
+/** 进入终端的备用屏幕：分块读取的巨量输出不会污染主屏的滚动记录 */
+export async function enterSilentScreen(): Promise<void> {
+    await runShell("printf '\\033[?1049h'");
+}
+
+/** 退出备用屏幕，恢复主屏原有内容 */
+export async function exitSilentScreen(): Promise<void> {
+    await runShell("printf '\\033[?1049l'");
+}
+
 /** 关闭复用的终端；读完大段内容后调用，避免终端面板里残留一屏 base64 */
 export async function closeShellTerminal(): Promise<void> {
     const api = window.toolboxAPI?.terminal;

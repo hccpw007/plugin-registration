@@ -8,7 +8,7 @@
  */
 
 import { base64ToBytes, bytesToBase64 } from "./base64";
-import { closeShellTerminal, extractMarkedLine, runShell } from "./file-shell";
+import { closeShellTerminal, enterSilentScreen, exitSilentScreen, extractMarkedLine, runShell } from "./file-shell";
 
 /** 每块读取的字节数：块越小 PTY 单次输出越不容易被截断或混入噪声 */
 const CHUNK_SIZE = 256 * 1024;
@@ -104,8 +104,18 @@ export async function readFileContentFromShell(path: string, size: number): Prom
     }
 }
 
-/** 实际的分块读取与校验流程 */
+/** 实际的分块读取与校验流程；读取期间切到终端备用屏幕，主屏看不到刷屏 */
 async function readContent(path: string, size: number): Promise<ShellContentResult> {
+    await enterSilentScreen();
+    try {
+        return await readContentInSilentScreen(path, size);
+    } finally {
+        await exitSilentScreen();
+    }
+}
+
+/** 在备用屏幕内分块读取并校验 */
+async function readContentInSilentScreen(path: string, size: number): Promise<ShellContentResult> {
     if (!path || size <= 0) return { content: null, error: "No file size is available for this file." };
     const platform = detectPlatform();
     if (!platform) return { content: null, error: "Reading files through the shell is not supported on this platform." };
