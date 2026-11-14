@@ -1,0 +1,137 @@
+/**
+ * 通过终端分块读取文件的完整内容。
+ *
+ * 宿主 fileSystem.readBinary 在工具实例重启后会被拒绝（授权只在当前会话有效），
+ * 而终端命令不受该路径授权限制，因此在 readBinary 失败时改用分块命令读取。
+ * PTY 传输大段文本有噪声风险，所以读取后必须通过 sha256 与磁盘上的真实内容比对，
+ * 校验不通过一律不使用 —— 绝不能把损坏的内容提交到 Dataverse。
+ */
+
+import { base64ToBytes, bytesToBase64 } from "./base64";
+import { extractBlock, runShell } from "./file-shell";
+
+/** 每块读取的字节数：块越小 PTY 单次输出越不容易被截断或混入噪声 */
+const CHUNK_SIZE = 256 * 1024;
+
+/** 单次读取的块数上限，避免超大文件把终端调用拖到不可接受的地步 */
+const MAX_CHUNKS = 512;
+
+/** 读取结果：成功时给出 Base64 内容，失败时说明原因 */
+export interface ShellContentResult {
+    /** Base64 编码的文件内容；读取或校验失败时为 null */
+    content: string | null;
+    /** 失败原因，用于界面提示 */
+    error?: string;
+}
+
+/** 计算字节数组的 sha256 十六进制摘要 */
+async function sha256Hex(bytes: Uint8Array): Promise<string | null> {
+    try {
+        // crypto.subtle 只接受 ArrayBuffer，先把视图复制成独立缓冲区
+        const buffer = new ArrayBuffer(bytes.length);
+        new Uint8Array(buffer).set(bytes);
+        const digest = await crypto.subtle.digest("SHA-256", buffer);
+        return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    } catch (e) { // 非安全上下文等情况下无法计算，交由调用方判定失败
+        console.warn("[file-content] 计算 sha256 失败:", e);
+        return null;
+    }
+}
+
+/** 检测文件所在平台；不支持的平台返回 null */
+function detectPlatform(): "darwin" | "win32" | "linux" | null {
+    const platform = `${navigator.platform} ${navigator.userAgent}`;
+    if (/mac/i.test(platform)) return "darwin";
+    if (/win/i.test(platform)) return "win32";
+    if (/linux/i.test(platform)) return "linux";
+    return null;
+}
+
+/** 转义单引号，保证路径能安全放进 shell 的单引号字符串 */
+function quotePath(path: string): string {
+    return `'${path.replace(/'/g, "'\\''")}'`;
+}
+
+/** 取磁盘上的真实 sha256（小写十六进制），用于校验读取结果 */
+async function readExpectedHash(platform: "darwin" | "win32" | "linux", path: string): Promise<string | null> {
+    const quoted = quotePath(path);
+    // 用标记包住摘要：终端会回显命令，而回显里含 a-f 等十六进制字符，直接清洗整个输出会误采集
+    const command = platform === "win32"
+        ? `powershell -NoProfile -Command "Write-Output '__HASH__'; `
+        + `(Get-FileHash -Algorithm SHA256 -LiteralPath ${quoted}).Hash.ToLower(); Write-Output '__HASH_END__'"`
+        : `printf '__HASH__'; shasum -a 256 ${quoted} 2>/dev/null | cut -d' ' -f1; printf '__HASH_END__'`;
+    const result = await runShell(command);
+    if (!result.output) return null;
+    const block = extractBlock(result.output, "__HASH__", "__HASH_END__");
+    if (!block) return null;
+    const hash = block.replace(/[^0-9a-fA-F]/g, "").toLowerCase();
+    return /^[0-9a-f]{64}$/.test(hash) ? hash : null;
+}
+
+/** 拼出读取某一块的命令，输出用标记包裹便于截取 */
+function buildChunkCommand(platform: "darwin" | "win32" | "linux", path: string, skip: number): string {
+    const quoted = quotePath(path);
+    if (platform === "win32") {
+        return `powershell -NoProfile -Command "Write-Output '__CHUNK__'; `
+            + `$b = [System.IO.File]::ReadAllBytes(${quoted}); `
+            + `$start = ${skip} * ${CHUNK_SIZE}; $len = [Math]::Min(${CHUNK_SIZE}, $b.Length - $start); `
+            + `if ($len -gt 0) { [Convert]::ToBase64String($b, $start, $len) } ; Write-Output '__CHUNK_END__'"`;
+    }
+    return `printf '__CHUNK__'; dd if=${quoted} bs=${CHUNK_SIZE} skip=${skip} count=1 2>/dev/null | base64 -b 0; `
+        + `printf '__CHUNK_END__'`;
+}
+
+/** 读取单个块并解码；失败返回 null */
+async function readChunk(platform: "darwin" | "win32" | "linux", path: string, skip: number): Promise<Uint8Array | null> {
+    const result = await runShell(buildChunkCommand(platform, path, skip));
+    if (!result.output) return null;
+    const block = extractBlock(result.output, "__CHUNK__", "__CHUNK_END__");
+    if (!block) return null;
+    // PTY 会在输出里混入控制字符：只保留 base64 字符集
+    const cleaned = block.replace(/[^A-Za-z0-9+/=]/g, "");
+    if (!cleaned) return null;
+    return base64ToBytes(cleaned);
+}
+
+/**
+ * 通过终端读取文件内容并校验。
+ * size 用于计算块数；只有 sha256 与磁盘一致时才返回内容。
+ */
+export async function readFileContentFromShell(path: string, size: number): Promise<ShellContentResult> {
+    if (!path || size <= 0) return { content: null, error: "No file size is available for this file." };
+    const platform = detectPlatform();
+    if (!platform) return { content: null, error: "Reading files through the shell is not supported on this platform." };
+
+    const chunkCount = Math.ceil(size / CHUNK_SIZE);
+    if (chunkCount > MAX_CHUNKS) {
+        return { content: null, error: "This file is too large to read through the shell." };
+    }
+
+    const expectedHash = await readExpectedHash(platform, path);
+    if (!expectedHash) return { content: null, error: "The shell could not read this file." };
+
+    const parts: Uint8Array[] = [];
+    let total = 0;
+    for (let skip = 0; skip < chunkCount; skip += 1) {
+        const chunk = await readChunk(platform, path, skip);
+        if (!chunk) return { content: null, error: `Reading chunk ${skip + 1}/${chunkCount} failed.` };
+        parts.push(chunk);
+        total += chunk.length;
+    }
+
+    const merged = new Uint8Array(total);
+    let offset = 0;
+    for (const part of parts) {
+        merged.set(part, offset);
+        offset += part.length;
+    }
+
+    if (merged.length !== size) {
+        return { content: null, error: `The file was read incompletely (${merged.length}/${size} bytes).` };
+    }
+    const actualHash = await sha256Hex(merged);
+    if (!actualHash || actualHash !== expectedHash) {
+        return { content: null, error: "The file content did not match the file on disk (checksum mismatch)." };
+    }
+    return { content: bytesToBase64(merged) };
+}

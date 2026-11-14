@@ -12,6 +12,7 @@ import {
 } from "../utils/assembly-file";
 import { NEW_ASSEMBLY_FILE_SCOPE, rememberAssemblyFile } from "../utils/assembly-file-history";
 import { readFileInfoFromShell } from "../utils/file-meta";
+import { readFileContentFromShell } from "../utils/file-content";
 import type { AssemblyFileInfo, LoadedAssemblyFile } from "../utils/assembly-file";
 import { SearchableSelect } from "./SearchableSelect";
 
@@ -53,6 +54,10 @@ export function RegisterAssemblyDialog({
     const [restoredFromLast, setRestoredFromLast] = useState(false);
     /** 正在从磁盘读取文件（选择或恢复最近文件），期间禁用选择入口 */
     const [readingFile, setReadingFile] = useState(false);
+    /** 正在通过终端分块读取文件内容（fileSystem 被拒时的替代通道） */
+    const [readingViaShell, setReadingViaShell] = useState(false);
+    /** 终端读取内容失败的原因；为空表示没有失败 */
+    const [shellReadError, setShellReadError] = useState("");
     const fileRef = useRef<HTMLInputElement>(null);
     const nativePickerAvailable = isNativeFilePickerAvailable();
     // 最近文件按程序集分开记忆：更新时用程序集 id，注册新程序集时用固定分组，
@@ -74,6 +79,27 @@ export function RegisterAssemblyDialog({
         });
     };
 
+    /**
+     * fileSystem.readBinary 被拒时，改用终端分块读取文件内容。
+     * 内容会与磁盘上的 sha256 比对，校验不通过一律不使用，避免提交损坏的 dll。
+     */
+    const readContentViaShell = (info: AssemblyFileInfo, isCancelled: () => boolean) => {
+        if (info.size <= 0) return;
+        setReadingViaShell(true);
+        void readFileContentFromShell(info.path, info.size).then((result) => {
+            if (isCancelled()) return;
+            setReadingViaShell(false);
+            if (!result.content) {
+                console.warn("[RegisterAssemblyDialog] 终端读取文件内容失败:", result.error);
+                setShellReadError(result.error ?? "The shell could not read this file.");
+                return;
+            }
+            setShellReadError("");
+            setContent(result.content);
+            setAssemblyName(info.name.replace(/\.dll$/i, ""));
+        });
+    };
+
     // Reset form state whenever the dialog opens or the target assembly changes
     useEffect(() => {
         if (!isOpen) return;
@@ -85,6 +111,8 @@ export function RegisterAssemblyDialog({
         setSaving(false);
         setFileError("");
         setFileReadError("");
+        setShellReadError("");
+        setReadingViaShell(false);
         setSelectedFile(null);
         setRestoredFromLast(false);
         if (fileRef.current) fileRef.current.value = "";
@@ -103,10 +131,11 @@ export function RegisterAssemblyDialog({
                 const loaded = await loadAssemblyFile(latest.path);
                 if (cancelled) return;
                 if (!loaded.file) {
-                    // 读不到（宿主重启后文件访问授权失效、文件被移动等）：只回显路径与最近使用时间，
-                    // 不给内容也不给大小/修改时间，等用户重新选择；同时保留宿主的原始错误说明原因
+                    // 宿主重启后 fileSystem 授权失效：先回显实时读到的属性，
+                    // 再改用终端读取内容（带 sha256 校验），成功后无需 Browse 即可提交
                     setSelectedFile(latest);
                     setFileReadError(loaded.error ?? "");
+                    readContentViaShell(latest, () => cancelled);
                     return;
                 }
                 setFileReadError("");
@@ -130,6 +159,7 @@ export function RegisterAssemblyDialog({
     /** 把读到的文件应用到表单，并按磁盘实时状态刷新最近文件列表 */
     const applyLoadedFile = async (loaded: LoadedAssemblyFile, fromRecent: boolean) => {
         setFileReadError("");
+        setShellReadError("");
         setSelectedFile(loaded.info);
         setContent(loaded.content);
         setAssemblyName(loaded.info.name.replace(/\.dll$/i, ""));
@@ -164,6 +194,8 @@ export function RegisterAssemblyDialog({
                 // 读取失败：重新校验列表（refresh 只清理确认不存在的记录），当前文件保持不变
                 setRecentFiles(await refreshRecentAssemblyFiles(fileScope));
                 setFileError(`Unable to read this file: ${loaded.error ?? "unknown reason"}`);
+                const fallback = recentFiles.find((file) => file.path === path);
+                if (fallback) readContentViaShell(fallback, () => false);
                 return;
             }
             // 选中的文件前移为最近使用
@@ -290,11 +322,16 @@ export function RegisterAssemblyDialog({
                         {restoredFromLast && (
                             <div className="form-hint">Loaded automatically from your recent files.</div>
                         )}
-                        {/* 读不到文件（宿主重启后访问授权失效、文件被移动等）：带上宿主原始错误说明原因 */}
-                        {selectedFile && !content && (
+                        {/* fileSystem 被拒时正在改用终端分块读取内容 */}
+                        {readingViaShell && !content && (
+                            <div className="form-hint">Reading the file through the system shell…</div>
+                        )}
+                        {/* 两条通道都读不到：说明原因并引导重新选择 */}
+                        {selectedFile && !content && !readingViaShell && (
                             <div className="form-hint form-hint-warning">
-                                Unable to read this file{fileReadError ? `: ${fileReadError}` : "."} Use Browse to
-                                re-select it — the dialog opens at the last folder.
+                                Unable to read this file
+                                {shellReadError ? `: ${shellReadError}` : fileReadError ? `: ${fileReadError}` : "."}{" "}
+                                Use Browse to re-select it — the dialog opens at the last folder.
                             </div>
                         )}
                         {fileError && <div className="form-hint form-hint-error">{fileError}</div>}

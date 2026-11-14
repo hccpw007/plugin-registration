@@ -7,13 +7,11 @@
  */
 
 import { readRecentRecords, rememberAssemblyFile, writeRecentRecords } from "./assembly-file-history";
+import { bytesToBase64 } from "./base64";
 import { readFileInfoFromShell } from "./file-meta";
 
 /** 原生文件对话框的 DLL 过滤条件 */
 const DLL_FILE_FILTERS = [{ name: "Assembly", extensions: ["dll"] }];
-
-/** 单次拼接的字节块大小，避免 String.fromCharCode 参数过长导致调用栈溢出 */
-const BASE64_CHUNK_SIZE = 0x8000;
 
 /** 已选程序集文件的元信息；除 path 外均由磁盘实时读取或本次操作产生，不落盘 */
 export interface AssemblyFileInfo {
@@ -58,15 +56,6 @@ function toBytes(payload: unknown): Uint8Array {
     // Electron 主进程 Buffer 序列化后可能变成 { type: "Buffer", data: number[] }
     if (serialized && Array.isArray(serialized.data)) return new Uint8Array(serialized.data as number[]);
     throw new Error("Unsupported binary payload returned by the host.");
-}
-
-/** 把字节数组编码为 Base64 */
-function bytesToBase64(bytes: Uint8Array): string {
-    let binary = "";
-    for (let offset = 0; offset < bytes.length; offset += BASE64_CHUNK_SIZE) {
-        binary += String.fromCharCode(...bytes.subarray(offset, offset + BASE64_CHUNK_SIZE));
-    }
-    return btoa(binary);
 }
 
 /** 把字节数格式化为便于阅读的大小（如 1.2 MB） */
