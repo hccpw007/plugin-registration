@@ -420,8 +420,12 @@ export function RegisterAssemblyDialog({
                 </div>
                 <div className="dialog-footer">
                     <button className="btn-secondary" onClick={onClose} disabled={saving}>Cancel</button>
-                    <button className="btn-primary" onClick={() => void handleSubmit()} disabled={saving || !content}>
-                        {/* 读取中明确显示进度，让用户知道按钮为什么还不能点 */}
+                    {/* 读取期间一律不可提交：即使旧内容还在，也不能拿它去覆盖 */}
+                    <button
+                        className="btn-primary"
+                        onClick={() => void handleSubmit()}
+                        disabled={saving || readingViaShell || !content}
+                    >
                         {saving ? "Saving…" : readingViaShell ? "Reading…" : isUpdate ? "Update" : "Register"}
                     </button>
                 </div>
