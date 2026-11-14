@@ -1,9 +1,9 @@
 import { useState, useRef, useEffect } from "react";
 
 import type { PluginAssembly, PluginPackage } from "../models/interfaces";
+import { formatDateTime } from "../utils/datetime";
 import {
     formatFileSize,
-    formatFileTimestamp,
     isNativeFilePickerAvailable,
     loadAssemblyFile,
     pickAssemblyFile,
@@ -188,7 +188,7 @@ export function RegisterAssemblyDialog({
             value: file.path,
             label: file.name,
             description: file.size > 0 && file.modifiedAt > 0
-                ? `${formatFileSize(file.size)} · ${formatFileTimestamp(file.modifiedAt)}`
+                ? `${formatFileSize(file.size)} · ${formatDateTime(file.modifiedAt)}`
                 : "File info unavailable",
         }));
 
@@ -250,8 +250,8 @@ export function RegisterAssemblyDialog({
                                     )}
                                     <span className="file-info-meta">
                                         {selectedFile.size > 0 ? formatFileSize(selectedFile.size) : "Size unavailable"}
-                                        {" · Added "}{formatFileTimestamp(selectedFile.addedAt)}
-                                        {selectedFile.modifiedAt > 0 && ` · Modified ${formatFileTimestamp(selectedFile.modifiedAt)}`}
+                                        {" · Added "}{formatDateTime(selectedFile.addedAt)}
+                                        {selectedFile.modifiedAt > 0 && ` · Modified ${formatDateTime(selectedFile.modifiedAt)}`}
                                     </span>
                                 </div>
                             </div>

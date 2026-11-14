@@ -97,14 +97,6 @@ export function formatFileSize(bytes: number): string {
     return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unitIndex]}`;
 }
 
-/** 把毫秒时间戳格式化为本地时间 YYYY-MM-DD HH:mm:ss */
-export function formatFileTimestamp(timestamp: number): string {
-    const date = new Date(timestamp);
-    const pad = (value: number) => String(value).padStart(2, "0");
-    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
-        `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
-}
-
 /** 校验并归一化存储中的一条记录；无磁盘路径的记录（旧版浏览器选择）无法复用，返回 null */
 function normalizeRecord(raw: unknown): RecentAssemblyFileRecord | null {
     if (!raw || typeof raw !== "object") return null;

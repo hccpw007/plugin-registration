@@ -1,3 +1,4 @@
+import { formatDateTime } from "../utils/datetime";
 import { PropertySection } from "./PropertySection";
 
 /**
@@ -72,13 +73,13 @@ export function PackageDetails({ pkg, managedIdentitySupported, managedIdentityN
                 {pkg.createdon && (
                     <div className="prop-row">
                         <span className="prop-label">CreatedOn</span >
-                        <span className="prop-value">{pkg.createdon}</span >
+                        <span className="prop-value">{formatDateTime(pkg.createdon)}</span >
                     </div >
                 )}
                 {pkg.modifiedon && (
                     <div className="prop-row">
                         <span className="prop-label">ModifiedOn</span >
-                        <span className="prop-value">{pkg.modifiedon}</span >
+                        <span className="prop-value">{formatDateTime(pkg.modifiedon)}</span >
                     </div >
                 )}
             </PropertySection>

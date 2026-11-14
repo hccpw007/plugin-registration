@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { PluginAssembly } from "../models/interfaces";
+import { formatDateTime } from "../utils/datetime";
 import { PropertySection } from "./PropertySection";
 
 interface AssemblyDetailsProps {
@@ -80,7 +81,7 @@ export function AssemblyDetails({
                 {assembly.createdon && (
                     <div className="prop-row">
                         <span className="prop-label">CreatedOn</span>
-                        <span className="prop-value">{assembly.createdon}</span>
+                        <span className="prop-value">{formatDateTime(assembly.createdon)}</span>
                     </div>
                 )}
                 <div className="prop-row">
@@ -94,7 +95,7 @@ export function AssemblyDetails({
                 {assembly.modifiedon && (
                     <div className="prop-row">
                         <span className="prop-label">ModifiedOn</span>
-                        <span className="prop-value">{assembly.modifiedon}</span>
+                        <span className="prop-value">{formatDateTime(assembly.modifiedon)}</span>
                     </div>
                 )}
                 <div className="prop-row">

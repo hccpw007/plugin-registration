@@ -1,4 +1,5 @@
 import type { PluginType } from "../models/interfaces";
+import { formatDateTime } from "../utils/datetime";
 import { PropertySection } from "./PropertySection";
 
 interface PluginTypeDetailsProps {
@@ -17,7 +18,7 @@ export function PluginTypeDetails({ pluginType, onRegisterStep }: PluginTypeDeta
                 {pluginType.createdon && (
                     <div className="prop-row">
                         <span className="prop-label">CreatedOn</span>
-                        <span className="prop-value">{pluginType.createdon}</span>
+                        <span className="prop-value">{formatDateTime(pluginType.createdon)}</span>
                     </div>
                 )}
                 <div className="prop-row">
@@ -31,7 +32,7 @@ export function PluginTypeDetails({ pluginType, onRegisterStep }: PluginTypeDeta
                 {pluginType.modifiedon && (
                     <div className="prop-row">
                         <span className="prop-label">ModifiedOn</span>
-                        <span className="prop-value">{pluginType.modifiedon}</span>
+                        <span className="prop-value">{formatDateTime(pluginType.modifiedon)}</span>
                     </div>
                 )}
                 <div className="prop-row">

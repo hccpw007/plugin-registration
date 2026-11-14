@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
 
 import type { PluginType, ProcessingStep, StepImage } from "../models/interfaces";
+import { formatDateTime } from "../utils/datetime";
 
 interface BottomGridProps {
     mode: "plugins" | "steps" | "images" | "none";
@@ -200,7 +201,7 @@ export function BottomGrid({ mode, pluginTypes, steps, images }: BottomGridProps
                             <td>{pt.typename}</td>
                             <td>{pt.workflowactivitygroupname || "—"}</td>
                             <td>{pt.description || "—"}</td>
-                            <td>{pt.modifiedon || "—"}</td>
+                            <td>{pt.modifiedon ? formatDateTime(pt.modifiedon) : "—"}</td>
                         </tr>
                     ))}
                 </tbody>

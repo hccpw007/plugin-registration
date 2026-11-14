@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { ServiceEndpoint } from "../models/interfaces";
+import { formatDateTime } from "../utils/datetime";
 import { PropertySection } from "./PropertySection";
 
 interface ServiceEndpointDetailsProps {
@@ -158,13 +159,13 @@ export function ServiceEndpointDetails({ endpoint, onUpdate, onUnregister, onReg
                 {endpoint.createdon && (
                     <div className="prop-row">
                         <span className="prop-label" onClick={() => setFocusedField("CreatedOn")}>CreatedOn</span>
-                        <span className="prop-value" onClick={() => setFocusedField("CreatedOn")}>{endpoint.createdon}</span>
+                        <span className="prop-value" onClick={() => setFocusedField("CreatedOn")}>{formatDateTime(endpoint.createdon)}</span>
                     </div>
                 )}
                 {endpoint.modifiedon && (
                     <div className="prop-row">
                         <span className="prop-label" onClick={() => setFocusedField("ModifiedOn")}>ModifiedOn</span>
-                        <span className="prop-value" onClick={() => setFocusedField("ModifiedOn")}>{endpoint.modifiedon}</span>
+                        <span className="prop-value" onClick={() => setFocusedField("ModifiedOn")}>{formatDateTime(endpoint.modifiedon)}</span>
                     </div>
                 )}
             </PropertySection>
