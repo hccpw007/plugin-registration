@@ -1004,6 +1004,49 @@ button:disabled {
     color: var(--button-danger-bg);
 }
 
+/* ── 已选程序集文件信息卡片（名称 / 路径 / 大小与时间） ── */
+.file-info-card {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin-top: 6px;
+    padding: 6px 9px;
+    background-color: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 3px;
+}
+
+.file-info-body {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 0;
+    gap: 2px;
+}
+
+.file-info-name {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.file-info-path {
+    font-size: 11px;
+    color: var(--text-secondary);
+    font-family: "Consolas", "Courier New", monospace;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.file-info-meta {
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
 /* ── Searchable select（可输入筛选的下拉） ── */
 .searchable-select {
     position: relative;
