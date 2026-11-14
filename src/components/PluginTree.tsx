@@ -4,7 +4,7 @@ interface PluginTreeProps {
     nodes: TreeNode[];
     selectedId: string | null;
     onSelectNode: (node: TreeNode) => void;
-    onToggleExpand: (nodeId: string) => void;
+    onToggleExpand: (node: TreeNode) => void;
     onDoubleClickNode?: (node: TreeNode) => void;
     emptyMessage?: string;
 }
@@ -57,7 +57,7 @@ interface FlatNodeProps {
     depth: number;
     selectedId: string | null;
     onSelectNode: (node: TreeNode) => void;
-    onToggleExpand: (nodeId: string) => void;
+    onToggleExpand: (node: TreeNode) => void;
     onDoubleClickNode?: (node: TreeNode) => void;
 }
 
@@ -77,7 +77,7 @@ function FlatNode({ node, depth, selectedId, onSelectNode, onToggleExpand, onDou
 
     const handleToggleClick = (e: React.MouseEvent) => {
         e.stopPropagation();
-        onToggleExpand(node.id);
+        onToggleExpand(node);
     };
 
     const handleSelectClick = () => {

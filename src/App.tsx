@@ -146,18 +146,18 @@ function buildTreeNodes(
 }
 
 /** Filter tree nodes for search. Images are excluded from matching but shown as children of matched steps. */
-function filterTreeForSearch(nodes: TreeNode[], lowerTerm: string): TreeNode[] {
+function filterTreeForSearch(nodes: TreeNode[], lowerTerm: string, collapsedIds: Set<string>): TreeNode[] {
     if (!lowerTerm) return nodes;
     return nodes.flatMap((node) => {
         const nameMatch = node.type !== "image" && node.name.toLowerCase().includes(lowerTerm);
         if (nameMatch) {
-            // Show this node (expanded) with all original children
-            return [{ ...node, isExpanded: !!(node.children && node.children.length > 0) }];
+            // Show this node with all original children; nodes the user collapsed during search stay collapsed
+            return [{ ...node, isExpanded: !collapsedIds.has(node.id) && !!(node.children && node.children.length > 0) }];
         }
         if (node.type !== "image" && node.children) {
-            const filteredChildren = filterTreeForSearch(node.children, lowerTerm);
+            const filteredChildren = filterTreeForSearch(node.children, lowerTerm, collapsedIds);
             if (filteredChildren.length > 0) {
-                return [{ ...node, children: filteredChildren, isExpanded: true }];
+                return [{ ...node, children: filteredChildren, isExpanded: !collapsedIds.has(node.id) }];
             }
         }
         return [];
@@ -187,6 +187,8 @@ export default function App() {
 
     // Search
     const [searchTerm, setSearchTerm] = useState("");
+    // 搜索期间被用户手动折叠的节点：搜索结果默认展开，但仍需允许逐个收起
+    const [searchCollapsedIds, setSearchCollapsedIds] = useState<Set<string>>(new Set());
 
     // Filter toggles
     const [showPlugins, setShowPlugins] = useState(true);
@@ -355,16 +357,32 @@ export default function App() {
     );
 
     const handleToggleExpand = useCallback(
-        async (nodeId: string) => {
+        async (node: TreeNode) => {
+            const nodeId = node.id;
+            // 直接取节点当前的可见展开状态取反：搜索态下展开与否由过滤结果决定，
+            // 用 expandedIds 判断会与可见状态不一致，导致收起后又被重新展开
+            const willExpand = !node.isExpanded;
             setExpandedIds((prev: Set<string>) => {
                 const next = new Set(prev);
-                if (next.has(nodeId)) {
-                    next.delete(nodeId);
-                } else {
+                if (willExpand) {
                     next.add(nodeId);
+                } else {
+                    next.delete(nodeId);
                 }
                 return next;
             });
+            // 搜索状态下结果默认全部展开，记录用户手动折叠的节点，否则收起后会被搜索过滤逻辑重新展开
+            if (searchTerm) {
+                setSearchCollapsedIds((prev) => {
+                    const next = new Set(prev);
+                    if (willExpand) {
+                        next.delete(nodeId);
+                    } else {
+                        next.add(nodeId);
+                    }
+                    return next;
+                });
+            }
 
             // Lazy-load children on expand
             const asm = assemblies.find((a: PluginAssembly) => a.pluginassemblyid === nodeId);
@@ -423,7 +441,7 @@ export default function App() {
                 }
             }
         },
-        [assemblies, pluginTypes, steps, images, serviceEndpoints, endpointSteps],
+        [assemblies, pluginTypes, steps, images, serviceEndpoints, endpointSteps, searchTerm],
     );
 
     const notify = (message: string, type: "success" | "error" = "success") => {
@@ -1140,7 +1158,7 @@ export default function App() {
     const rawTreeNodes = buildTreeNodes(assemblies, packages, pluginTypes, steps, images, expandedIds, serviceEndpoints, endpointSteps, showPlugins, showEndpoints, viewMode);
 
     const treeNodes = searchTerm
-        ? filterTreeForSearch(rawTreeNodes, searchTerm.toLowerCase())
+        ? filterTreeForSearch(rawTreeNodes, searchTerm.toLowerCase(), searchCollapsedIds)
         : rawTreeNodes;
 
     if (loading && assemblies.length === 0) {
@@ -1368,17 +1386,28 @@ export default function App() {
                             type="text"
                             placeholder="Search assemblies, plugins, steps…"
                             value={searchTerm}
-                            onChange={(e) => setSearchTerm(e.target.value)}
+                            onChange={(e) => {
+                                setSearchTerm(e.target.value);
+                                // 搜索词变化后重置手动折叠记录，让新的搜索结果重新默认展开
+                                setSearchCollapsedIds(new Set());
+                            }}
                         />
                         {searchTerm && (
-                            <button className="tree-search-clear" onClick={() => setSearchTerm("")} title="Clear search">✕</button>
+                            <button
+                                className="tree-search-clear"
+                                onClick={() => {
+                                    setSearchTerm("");
+                                    setSearchCollapsedIds(new Set());
+                                }}
+                                title="Clear search"
+                            >✕</button>
                         )}
                     </div>
                     <PluginTree
                         nodes={treeNodes}
                         selectedId={selectedNode?.id ?? null}
                         onSelectNode={(node) => void handleSelectNode(node)}
-                        onToggleExpand={(id) => void handleToggleExpand(id)}
+                        onToggleExpand={(node) => void handleToggleExpand(node)}
                         onDoubleClickNode={handleDoubleClickNode}
                         emptyMessage={
                             searchTerm
