@@ -7,11 +7,10 @@
  * Windows 用 PowerShell 的 Length / LastWriteTime / CreationTime，Linux 用 stat 的 %s / %Y / %W。
  */
 
-import { extractBlock, runShell } from "./file-shell";
+import { extractMarkedLine, runShell } from "./file-shell";
 
-/** 命令输出中用来截取结果的标记 */
+/** 命令输出中用来标记结果行的前缀 */
 const START_MARKER = "__FILE_META__";
-const END_MARKER = "__FILE_META_END__";
 
 /** 文件的元信息，时间均为毫秒时间戳 */
 export interface FileMeta {
@@ -31,8 +30,8 @@ export interface ShellFileInfo {
     meta: FileMeta | null;
 }
 
-/** 文件不存在时命令输出的标记 */
-const MISSING_MARKER = "__FILE_MISSING__";
+/** 文件不存在时，结果行里代替属性内容出现的标记 */
+const MISSING_MARKER = "MISSING";
 
 /** 检测文件所在平台；不支持时返回 null */
 function detectPlatform(): "darwin" | "win32" | "linux" | null {
@@ -56,21 +55,22 @@ function quotePath(path: string): string {
 function buildCommand(platform: "darwin" | "win32" | "linux", path: string): string {
     const quoted = quotePath(path);
     if (platform === "win32") {
-        return `powershell -NoProfile -Command "Write-Output '${START_MARKER}'; `
-            + `if (Test-Path -LiteralPath ${quoted}) { $f = Get-Item -LiteralPath ${quoted}; `
-            + `Write-Output ((\\$f.Length) + '|' + ([DateTimeOffset]\\$f.LastWriteTime).ToUnixTimeSeconds() `
+        return `powershell -NoProfile -Command "if (Test-Path -LiteralPath ${quoted}) { `
+            + `\\$f = Get-Item -LiteralPath ${quoted}; `
+            + `Write-Output ('${START_MARKER}' + \\$f.Length + '|' + ([DateTimeOffset]\\$f.LastWriteTime).ToUnixTimeSeconds() `
             + `+ '|' + ([DateTimeOffset]\\$f.CreationTime).ToUnixTimeSeconds() + '|' + ([DateTimeOffset]\\$f.CreationTime).ToUnixTimeSeconds()) `
-            + `} else { Write-Output '${MISSING_MARKER}' }; Write-Output '${END_MARKER}'"`;
+            + `} else { Write-Output ('${START_MARKER}' + '${MISSING_MARKER}') }"`;
     }
     if (platform === "linux") {
-        return `printf '${START_MARKER}'; if [ -f ${quoted} ]; then stat -c '%s|%Y' ${quoted} 2>/dev/null; `
-            + `printf '|'; stat -c %W ${quoted} 2>/dev/null; printf '|'; stat -c %W ${quoted} 2>/dev/null; `
-            + `else printf '${MISSING_MARKER}'; fi; printf '${END_MARKER}'`;
+        return `if [ -f ${quoted} ]; then printf '${START_MARKER}%s\\n' `
+            + `"$(stat -c '%s|%Y' ${quoted} 2>/dev/null)|$(stat -c %W ${quoted} 2>/dev/null)|`
+            + `$(stat -c %W ${quoted} 2>/dev/null)"; else printf '${START_MARKER}${MISSING_MARKER}\\n'; fi`;
     }
-    // macOS：mdls 的 kMDItemDateAdded 就是 Finder"添加日期"，末尾再附 birthtime 作为兜底
-    return `printf '${START_MARKER}'; if [ -f ${quoted} ]; then stat -f '%z|%m' ${quoted} 2>/dev/null; `
-        + `printf '|'; mdls -name kMDItemDateAdded -raw ${quoted} 2>/dev/null; printf '|'; `
-        + `stat -f %B ${quoted} 2>/dev/null; else printf '${MISSING_MARKER}'; fi; printf '${END_MARKER}'`;
+    // macOS：mdls 的 kMDItemDateAdded 就是 Finder"添加日期"，末尾再附 birthtime 作为兜底。
+    // 整段用一条 printf 输出成单行，避免末尾缺少换行时与宿主的哨兵行合并而被丢弃
+    return `if [ -f ${quoted} ]; then printf '${START_MARKER}%s\\n' `
+        + `"$(stat -f '%z|%m' ${quoted} 2>/dev/null)|$(mdls -name kMDItemDateAdded -raw ${quoted} 2>/dev/null)|`
+        + `$(stat -f %B ${quoted} 2>/dev/null)"; else printf '${START_MARKER}${MISSING_MARKER}\\n'; fi`;
 }
 
 /** 把毫秒或秒级时间戳统一成毫秒；无法解析时返回 0 */
@@ -86,11 +86,9 @@ function toMillis(raw: string): number {
     return Number.isNaN(parsed) ? 0 : parsed;
 }
 
-/** 解析命令输出；无法解析时返回 null */
-function parseMeta(output: string): FileMeta | null {
-    const block = extractBlock(output, START_MARKER, END_MARKER);
-    if (!block) return null;
-    const parts = block.trim().split("|");
+/** 解析结果行；无法解析时返回 null */
+function parseMetaLine(line: string): FileMeta | null {
+    const parts = line.split("|");
     if (parts.length < 2) return null;
     const size = Number(parts[0]);
     if (!Number.isFinite(size) || size < 0) return null;
@@ -107,11 +105,10 @@ export async function readFileInfoFromShell(path: string): Promise<ShellFileInfo
     if (!platform) return null;
     const result = await runShell(buildCommand(platform, path));
     if (!result.output) return null;
-    const block = extractBlock(result.output, START_MARKER, END_MARKER);
-    if (!block) return null;
-    // 命令明确报告文件不存在
-    if (block.includes(MISSING_MARKER)) return { exists: false, meta: null };
-    const meta = parseMeta(result.output);
-    // 命令跑通但属性解析不出来：文件按存在处理，避免因一次解析失败删掉历史记录
-    return { exists: true, meta };
+    // 取最后一次出现的标记：命令回显在前，实际结果在后
+    const line = extractMarkedLine(result.output, START_MARKER);
+    if (line === null) return null;
+    if (line === MISSING_MARKER) return { exists: false, meta: null };
+    // 结果行解析不出来时按"文件仍存在"处理，避免因一次解析失败删掉历史记录
+    return { exists: true, meta: parseMetaLine(line) };
 }

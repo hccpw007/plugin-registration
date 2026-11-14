@@ -66,3 +66,18 @@ export function extractBlock(output: string, startMarker: string, endMarker: str
     if (start < 0 || end <= start) return null;
     return clean.slice(start + startMarker.length, end);
 }
+
+/**
+ * 取出标记所在行的剩余内容。
+ *
+ * 宿主用哨兵行判断命令结束，若输出末尾没有换行，最后一段会和哨兵拼成同一行被整体丢弃，
+ * 因此命令一律写成「标记 + 内容 + 换行」的单行输出，这里按行解析。
+ */
+export function extractMarkedLine(output: string, marker: string): string | null {
+    const clean = output.replace(/\x1b\[[0-9;]*m/g, "").replace(/\r/g, "");
+    const index = clean.lastIndexOf(marker);
+    if (index < 0) return null;
+    const rest = clean.slice(index + marker.length);
+    const lineEnd = rest.indexOf("\n");
+    return (lineEnd < 0 ? rest : rest.slice(0, lineEnd)).trim();
+}

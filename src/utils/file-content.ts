@@ -8,7 +8,7 @@
  */
 
 import { base64ToBytes, bytesToBase64 } from "./base64";
-import { extractBlock, runShell } from "./file-shell";
+import { extractMarkedLine, runShell } from "./file-shell";
 
 /** 每块读取的字节数：块越小 PTY 单次输出越不容易被截断或混入噪声 */
 const CHUNK_SIZE = 256 * 1024;
@@ -57,12 +57,11 @@ async function readExpectedHash(platform: "darwin" | "win32" | "linux", path: st
     const quoted = quotePath(path);
     // 用标记包住摘要：终端会回显命令，而回显里含 a-f 等十六进制字符，直接清洗整个输出会误采集
     const command = platform === "win32"
-        ? `powershell -NoProfile -Command "Write-Output '__HASH__'; `
-        + `(Get-FileHash -Algorithm SHA256 -LiteralPath ${quoted}).Hash.ToLower(); Write-Output '__HASH_END__'"`
-        : `printf '__HASH__'; shasum -a 256 ${quoted} 2>/dev/null | cut -d' ' -f1; printf '__HASH_END__'`;
+        ? `powershell -NoProfile -Command "Write-Output ('__HASH__' + (Get-FileHash -Algorithm SHA256 -LiteralPath ${quoted}).Hash.ToLower())"`
+        : `printf '__HASH__%s\\n' "$(shasum -a 256 ${quoted} 2>/dev/null | cut -d' ' -f1)"`;
     const result = await runShell(command);
     if (!result.output) return null;
-    const block = extractBlock(result.output, "__HASH__", "__HASH_END__");
+    const block = extractMarkedLine(result.output, "__HASH__");
     if (!block) return null;
     const hash = block.replace(/[^0-9a-fA-F]/g, "").toLowerCase();
     return /^[0-9a-f]{64}$/.test(hash) ? hash : null;
@@ -72,20 +71,19 @@ async function readExpectedHash(platform: "darwin" | "win32" | "linux", path: st
 function buildChunkCommand(platform: "darwin" | "win32" | "linux", path: string, skip: number): string {
     const quoted = quotePath(path);
     if (platform === "win32") {
-        return `powershell -NoProfile -Command "Write-Output '__CHUNK__'; `
-            + `$b = [System.IO.File]::ReadAllBytes(${quoted}); `
-            + `$start = ${skip} * ${CHUNK_SIZE}; $len = [Math]::Min(${CHUNK_SIZE}, $b.Length - $start); `
-            + `if ($len -gt 0) { [Convert]::ToBase64String($b, $start, $len) } ; Write-Output '__CHUNK_END__'"`;
+        return `powershell -NoProfile -Command "\\$b = [System.IO.File]::ReadAllBytes(${quoted}); `
+            + `\\$start = ${skip} * ${CHUNK_SIZE}; \\$len = [Math]::Min(${CHUNK_SIZE}, \\$b.Length - \\$start); `
+            + `if (\\$len -gt 0) { Write-Output ('__CHUNK__' + [Convert]::ToBase64String(\\$b, \\$start, \\$len)) }"`;
     }
-    return `printf '__CHUNK__'; dd if=${quoted} bs=${CHUNK_SIZE} skip=${skip} count=1 2>/dev/null | base64 -b 0; `
-        + `printf '__CHUNK_END__'`;
+    // 单行输出：末尾没有换行时，宿主会把最后一段与哨兵行合并丢弃
+    return `printf '__CHUNK__%s\\n' "$(dd if=${quoted} bs=${CHUNK_SIZE} skip=${skip} count=1 2>/dev/null | base64 -b 0)"`;
 }
 
 /** 读取单个块并解码；失败返回 null */
 async function readChunk(platform: "darwin" | "win32" | "linux", path: string, skip: number): Promise<Uint8Array | null> {
     const result = await runShell(buildChunkCommand(platform, path, skip));
     if (!result.output) return null;
-    const block = extractBlock(result.output, "__CHUNK__", "__CHUNK_END__");
+    const block = extractMarkedLine(result.output, "__CHUNK__");
     if (!block) return null;
     // PTY 会在输出里混入控制字符：只保留 base64 字符集
     const cleaned = block.replace(/[^A-Za-z0-9+/=]/g, "");
