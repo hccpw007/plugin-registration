@@ -489,6 +489,20 @@ export default function App() {
         [assemblies, pluginTypes, steps, images, serviceEndpoints, endpointSteps, searchTerm],
     );
 
+    /**
+     * 取当前标签页的标识：连接名（Power Platform ToolBox 的标签页副标题就是它），
+     * 多个同工具标签页连不同环境时，通知里带上它才能分清是哪个标签页完成的操作。
+     */
+    const readWorkspaceLabel = async (): Promise<string> => {
+        try {
+            const connection = await window.toolboxAPI?.connections?.getActiveConnection();
+            return connection?.name ?? "";
+        } catch (e) { // 取不到连接时通知照常发出，只是不带标签页前缀
+            console.warn("[App] 获取当前连接信息失败:", e);
+            return "";
+        }
+    };
+
     const notify = (message: string, type: "success" | "error" = "success") => {
         if (window.toolboxAPI) {
             void window.toolboxAPI.utils.showNotification({ title: type === "success" ? "Success" : "Error", body: message, type });
@@ -535,7 +549,9 @@ export default function App() {
                 try {
                     const parsed = extractRegistrableTypes(content);
                     const sync = await client.syncPluginTypes(asm.pluginassemblyid, parsed, asm.name, asm.version);
-                    const summary = [`Assembly updated. ${sync.created.length} new plugin type(s) added.`];
+                    const workspace = await readWorkspaceLabel();
+                    const scope = [workspace, asm.name].filter(Boolean).join(" · ");
+                    const summary = [`${scope ? `[${scope}] ` : ""}Assembly updated. ${sync.created.length} new plugin type(s) added.`];
                     if (sync.skipped > 0) summary.push(`${sync.skipped} already registered.`);
                     if (sync.failed.length > 0) {
                         // 只展示失败类型名，完整原因留在控制台便于排查
@@ -551,7 +567,9 @@ export default function App() {
                     notify(`Assembly updated, but plugin type sync failed: ${msg}`, "error");
                 }
             } else {
-                notify("Assembly updated.");
+                const workspace = await readWorkspaceLabel();
+                const scope = [workspace, asm.name].filter(Boolean).join(" · ");
+                notify(`${scope ? `[${scope}] ` : ""}Assembly updated.`);
             }
 
             void loadAll();
