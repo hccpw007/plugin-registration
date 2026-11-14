@@ -8,7 +8,7 @@
  */
 
 import { base64ToBytes, bytesToBase64 } from "./base64";
-import { extractMarkedLine, runShell } from "./file-shell";
+import { closeShellTerminal, extractMarkedLine, runShell } from "./file-shell";
 
 /** 每块读取的字节数：块越小 PTY 单次输出越不容易被截断或混入噪声 */
 const CHUNK_SIZE = 256 * 1024;
@@ -96,6 +96,16 @@ async function readChunk(platform: "darwin" | "win32" | "linux", path: string, s
  * size 用于计算块数；只有 sha256 与磁盘一致时才返回内容。
  */
 export async function readFileContentFromShell(path: string, size: number): Promise<ShellContentResult> {
+    try {
+        return await readContent(path, size);
+    } finally {
+        // 分块内容会把终端面板刷满，读完后关闭终端，避免残留一屏 base64
+        await closeShellTerminal();
+    }
+}
+
+/** 实际的分块读取与校验流程 */
+async function readContent(path: string, size: number): Promise<ShellContentResult> {
     if (!path || size <= 0) return { content: null, error: "No file size is available for this file." };
     const platform = detectPlatform();
     if (!platform) return { content: null, error: "Reading files through the shell is not supported on this platform." };

@@ -57,6 +57,19 @@ export async function runShell(command: string): Promise<ShellResult> {
     }
 }
 
+/** 关闭复用的终端；读完大段内容后调用，避免终端面板里残留一屏 base64 */
+export async function closeShellTerminal(): Promise<void> {
+    const api = window.toolboxAPI?.terminal;
+    const id = terminalId;
+    terminalId = null;
+    if (!api || !id) return;
+    try {
+        await api.close(id);
+    } catch (e) { // 终端可能已被用户关闭：记录即可，不影响后续读取
+        console.warn("[file-shell] 关闭终端失败:", e);
+    }
+}
+
 /** 从命令输出中截取两个标记之间的内容；命令回显里的标记在前，故取最后一次出现 */
 export function extractBlock(output: string, startMarker: string, endMarker: string): string | null {
     // 去掉终端颜色控制字符与回车，PTY 输出里常见
