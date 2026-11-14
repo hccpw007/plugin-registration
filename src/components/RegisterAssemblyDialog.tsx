@@ -133,9 +133,9 @@ export function RegisterAssemblyDialog({
         try {
             const loaded = await loadAssemblyFile(path);
             if (!loaded) {
-                // 文件已不存在：清理该记录并提示改选，当前已加载的文件保持不变
+                // 读取失败：重新校验列表（refresh 只清理确认不存在的记录），当前文件保持不变
                 setRecentFiles(await refreshRecentAssemblyFiles());
-                setFileError("This file is no longer available. Choose another file.");
+                setFileError("Unable to read this file. Choose another file.");
                 return;
             }
             // 选中的文件前移为最近使用，addedAt 为本次加入表单的时间
@@ -180,13 +180,16 @@ export function RegisterAssemblyDialog({
     const title = isUpdate ? `Update Assembly: ${existingAssembly?.name ?? ""}` : "Register New Assembly";
 
     // 只有带磁盘路径的记录才能读回内容，浏览器降级记录不进"最近文件"下拉；
-    // 文件名作为主标签完整显示，大小与修改时间作为灰色小字放在第二行
+    // 文件名作为主标签完整显示，大小与修改时间作为灰色小字放在第二行。
+    // 元信息可能因权限等原因暂时读不到，此时给出明确提示而不是显示 0 B
     const recentFileOptions = recentFiles
         .filter((file) => file.path)
         .map((file) => ({
             value: file.path,
             label: file.name,
-            description: `${formatFileSize(file.size)} · ${formatFileTimestamp(file.modifiedAt)}`,
+            description: file.size > 0 && file.modifiedAt > 0
+                ? `${formatFileSize(file.size)} · ${formatFileTimestamp(file.modifiedAt)}`
+                : "File info unavailable",
         }));
 
     return (
@@ -246,9 +249,9 @@ export function RegisterAssemblyDialog({
                                         <span className="file-info-path" title={selectedFile.path}>{selectedFile.path}</span>
                                     )}
                                     <span className="file-info-meta">
-                                        {formatFileSize(selectedFile.size)}
+                                        {selectedFile.size > 0 ? formatFileSize(selectedFile.size) : "Size unavailable"}
                                         {" · Added "}{formatFileTimestamp(selectedFile.addedAt)}
-                                        {" · Modified "}{formatFileTimestamp(selectedFile.modifiedAt)}
+                                        {selectedFile.modifiedAt > 0 && ` · Modified ${formatFileTimestamp(selectedFile.modifiedAt)}`}
                                     </span>
                                 </div>
                             </div>

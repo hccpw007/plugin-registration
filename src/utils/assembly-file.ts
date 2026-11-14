@@ -157,22 +157,24 @@ export function rememberAssemblyFile(path: string, usedAt: number): void {
 }
 
 /**
- * 按磁盘实时状态校验最近文件列表：大小与修改时间重新读取，已不存在的记录直接清理。
- * 宿主不支持读取磁盘时无法校验，返回空列表并清除历史。
+ * 按磁盘实时状态校验最近文件列表：大小与修改时间重新读取。
+ * 只有确认文件已不存在（exists 为 false）或路径已不再是文件时才清理记录；
+ * 元信息暂时读不到（权限、宿主异常等）时保留记录，避免一次读取异常就丢掉整份历史。
  */
 export async function refreshRecentAssemblyFiles(): Promise<AssemblyFileInfo[]> {
     const records = readRecentRecords();
     if (records.length === 0) return [];
-    if (!isNativeFilePickerAvailable()) {
-        writeRecentRecords([]);
-        return [];
-    }
+    // 宿主不支持读取磁盘时无法校验，保留历史记录，避免环境异常时丢数据
+    if (!isNativeFilePickerAvailable()) return [];
 
     const fileSystem = window.toolboxAPI.fileSystem;
     const verified = await Promise.all<AssemblyFileInfo | null>(records.map(async (record) => {
         try {
             const stat = await fileSystem.stat(record.path);
-            if (stat.type !== "file") return null;
+            if (stat.type !== "file") { // 路径已变成目录等非文件对象：不再可用
+                console.warn("[assembly-file] 最近文件路径已不是文件，将从列表中移除:", record.path);
+                return null;
+            }
             const modifiedAt = Date.parse(stat.mtime);
             return {
                 path: record.path,
@@ -182,8 +184,19 @@ export async function refreshRecentAssemblyFiles(): Promise<AssemblyFileInfo[]> 
                 modifiedAt: Number.isNaN(modifiedAt) ? 0 : modifiedAt,
                 addedAt: record.lastUsedAt,
             };
-        } catch (e) { // 文件已被删除或移动：从最近文件列表中清理
-            console.warn("[assembly-file] 最近文件已不可用，将被移除:", record.path, e);
+        } catch (e) { // 元信息读取失败：先确认文件是否真的不存在，避免误删历史
+            let exists: boolean;
+            try {
+                exists = await fileSystem.exists(record.path);
+            } catch (existsError) { // 连存在性都判断不了时保守保留记录
+                console.warn("[assembly-file] 检查最近文件是否存在失败，保留记录:", record.path, existsError);
+                exists = true;
+            }
+            if (exists) {
+                console.warn("[assembly-file] 无法读取最近文件的元信息，保留记录:", record.path, e);
+                return { path: record.path, name: fileNameOf(record.path), size: 0, modifiedAt: 0, addedAt: record.lastUsedAt };
+            }
+            console.warn("[assembly-file] 最近文件已不存在，将从列表中移除:", record.path, e);
             return null;
         }
     }));
