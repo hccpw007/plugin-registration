@@ -43,6 +43,8 @@ export function RegisterAssemblyDialog({
     const [packageId, setPackageId] = useState(existingAssembly?._packageid_value ?? "");
     const [saving, setSaving] = useState(false);
     const [fileError, setFileError] = useState("");
+    /** 打开弹窗时读取最近文件失败的原因（宿主原始错误），用于说明为什么读不到 */
+    const [fileReadError, setFileReadError] = useState("");
     /** 当前选中的 DLL 元信息：用于显示文件大小、添加时间与修改时间 */
     const [selectedFile, setSelectedFile] = useState<AssemblyFileInfo | null>(null);
     /** 最近选择过的 DLL 列表（最新在前），用于在多个程序集之间快速切换 */
@@ -79,6 +81,7 @@ export function RegisterAssemblyDialog({
         setPackageId(existingAssembly?._packageid_value ?? "");
         setSaving(false);
         setFileError("");
+        setFileReadError("");
         setSelectedFile(null);
         setRestoredFromLast(false);
         if (fileRef.current) fileRef.current.value = "";
@@ -96,17 +99,19 @@ export function RegisterAssemblyDialog({
                 if (!latest) return;
                 const loaded = await loadAssemblyFile(latest.path);
                 if (cancelled) return;
-                if (!loaded) {
+                if (!loaded.file) {
                     // 读不到（宿主重启后文件访问授权失效、文件被移动等）：只回显路径与最近使用时间，
-                    // 不给内容也不给大小/修改时间，等用户重新选择
+                    // 不给内容也不给大小/修改时间，等用户重新选择；同时保留宿主的原始错误说明原因
                     setSelectedFile(latest);
+                    setFileReadError(loaded.error ?? "");
                     return;
                 }
-                setSelectedFile(loaded.info);
-                setContent(loaded.content);
-                setAssemblyName(loaded.info.name.replace(/\.dll$/i, ""));
+                setFileReadError("");
+                setSelectedFile(loaded.file.info);
+                setContent(loaded.file.content);
+                setAssemblyName(loaded.file.info.name.replace(/\.dll$/i, ""));
                 setRestoredFromLast(true);
-                fillAddedTime(loaded.info, () => cancelled);
+                fillAddedTime(loaded.file.info, () => cancelled);
             } catch (e) { // 恢复失败不阻断用户手动选择
                 console.error("[RegisterAssemblyDialog] 恢复最近使用的程序集文件失败:", e);
             } finally {
@@ -121,6 +126,7 @@ export function RegisterAssemblyDialog({
 
     /** 把读到的文件应用到表单，并按磁盘实时状态刷新最近文件列表 */
     const applyLoadedFile = async (loaded: LoadedAssemblyFile, fromRecent: boolean) => {
+        setFileReadError("");
         setSelectedFile(loaded.info);
         setContent(loaded.content);
         setAssemblyName(loaded.info.name.replace(/\.dll$/i, ""));
@@ -151,15 +157,15 @@ export function RegisterAssemblyDialog({
         setReadingFile(true);
         try {
             const loaded = await loadAssemblyFile(path);
-            if (!loaded) {
+            if (!loaded.file) {
                 // 读取失败：重新校验列表（refresh 只清理确认不存在的记录），当前文件保持不变
                 setRecentFiles(await refreshRecentAssemblyFiles(fileScope));
-                setFileError("Unable to read this file. Choose another file.");
+                setFileError(`Unable to read this file: ${loaded.error ?? "unknown reason"}`);
                 return;
             }
             // 选中的文件前移为最近使用
             rememberAssemblyFile(fileScope, path, Date.now());
-            await applyLoadedFile(loaded, false);
+            await applyLoadedFile(loaded.file, false);
         } catch (e) {
             console.error("[RegisterAssemblyDialog] 读取最近选择的程序集文件失败:", e);
             setFileError("Failed to read the selected file.");
@@ -281,12 +287,11 @@ export function RegisterAssemblyDialog({
                         {restoredFromLast && (
                             <div className="form-hint">Loaded automatically from your recent files.</div>
                         )}
-                        {/* 读不到文件（宿主重启后访问授权失效、文件被移动等）：说明原因并引导重新选择 */}
+                        {/* 读不到文件（宿主重启后访问授权失效、文件被移动等）：带上宿主原始错误说明原因 */}
                         {selectedFile && !content && (
                             <div className="form-hint form-hint-warning">
-                                Unable to read this file right now — Power Platform ToolBox may need you to pick it again
-                                after a restart, or the file may have been moved. Use Browse to re-select it; the dialog
-                                opens at the last folder.
+                                Unable to read this file{fileReadError ? `: ${fileReadError}` : "."} Use Browse to
+                                re-select it — the dialog opens at the last folder.
                             </div>
                         )}
                         {fileError && <div className="form-hint form-hint-error">{fileError}</div>}

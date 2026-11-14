@@ -176,13 +176,23 @@ export async function pickAssemblyFile(scope: string, defaultPath?: string): Pro
 }
 
 /** 读取某个历史路径对应的磁盘内容；宿主不支持或文件已不存在时返回 null */
-export async function loadAssemblyFile(path: string): Promise<LoadedAssemblyFile | null> {
-    if (!path || !isNativeFilePickerAvailable()) return null;
+/** 读取磁盘文件的结果：失败时保留宿主的原始错误，便于界面说清为什么读不到 */
+export interface AssemblyFileLoadResult {
+    /** 读取成功时的文件内容；失败为 null */
+    file: LoadedAssemblyFile | null;
+    /** 失败原因（宿主返回的错误信息），成功时为空 */
+    error?: string;
+}
+
+/** 读取某个历史路径对应的磁盘内容；读不到时把宿主的原始错误一并带回 */
+export async function loadAssemblyFile(path: string): Promise<AssemblyFileLoadResult> {
+    if (!path) return { file: null, error: "No file path was recorded." };
+    if (!isNativeFilePickerAvailable()) return { file: null, error: "This host does not provide file access." };
     try {
-        return await readAssemblyFileFromPath(path);
-    } catch (e) { // 文件被删除、移动或权限不足：返回 null 由界面清理该记录并提示重新选择
+        return { file: await readAssemblyFileFromPath(path) };
+    } catch (e) { // 文件被删除、移动或权限被拒：返回错误由界面提示重新选择
         console.error("[assembly-file] 读取程序集文件失败:", e);
-        return null;
+        return { file: null, error: e instanceof Error ? e.message : String(e) };
     }
 }
 

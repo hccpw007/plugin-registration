@@ -33,34 +33,42 @@ function buildCommand(platform: "darwin" | "win32" | "linux", path: string): str
     if (platform === "win32") {
         // CreationTime 是文件的创建时间，Windows 资源管理器"创建日期"同源
         return `powershell -NoProfile -Command "Write-Output '${START_MARKER}'; `
-            + `(Get-Item ${quoted}).CreationTime.ToString('yyyy-MM-dd HH:mm:ss'); Write-Output '${END_MARKER}'"`;
+            + `(Get-Item ${quoted}).CreationTime.ToString('yyyy-MM-dd HH:mm:ss') + '|'; Write-Output '${END_MARKER}'"`;
     }
-    if (platform === "linux") {
-        // %W 是 birthtime（秒），多数文件系统会给出 0 表示不支持
-        return `printf '${START_MARKER}'; stat -c %W ${quoted} 2>/dev/null; printf '${END_MARKER}'`;
-    }
-    // macOS：Spotlight 的 kMDItemDateAdded 就是 Finder"添加日期"；取不到时退化为 birthtime
-    return `printf '${START_MARKER}'; `
-        + `(mdls -name kMDItemDateAdded -raw ${quoted} 2>/dev/null || stat -f "%B" ${quoted}); `
-        + `printf '${END_MARKER}'`;
+    // macOS：kMDItemDateAdded 就是 Finder"添加日期"，Spotlight 未索引时返回 (null)；
+    // 竖线后面附上 birthtime（秒）作为兜底，两者由解析函数按优先级取用
+    const primary = platform === "darwin"
+        ? `mdls -name kMDItemDateAdded -raw ${quoted} 2>/dev/null`
+        : `stat -c %w ${quoted} 2>/dev/null`; // Linux 的 %w 是 birthtime（可读格式）
+    return `printf '${START_MARKER}'; ${primary}; printf '|'; stat -f %B ${quoted} 2>/dev/null `
+        + `|| stat -c %W ${quoted} 2>/dev/null; printf '${END_MARKER}'`;
 }
 
-/** 把命令输出解析成毫秒时间戳；无法解析时返回 null */
+/** 解析单个时间值：支持 "yyyy-MM-dd HH:mm:ss +0000"、epoch 秒、Linux 的 ISO birthtime */
+function parseValue(raw: string): number | null {
+    const value = raw.trim();
+    // mdls 在文件未被 Spotlight 索引时返回 (null)；空值同样视为读不到
+    if (!value || value === "(null)" || value === "-") return null;
+    // 时间戳形式（macOS 的 stat -f %B、Linux 的 stat -c %W）以秒为单位
+    if (/^\d+$/.test(value)) {
+        const seconds = Number(value);
+        return seconds > 0 ? seconds * 1000 : null;
+    }
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) ? null : parsed;
+}
+
+/** 把命令输出解析成毫秒时间戳；优先"添加日期"，缺失时退化为创建时间 */
 function parseOutput(output: string): number | null {
     // 去掉终端颜色控制字符与回车，PTY 输出里常见
     const clean = output.replace(/\x1b\[[0-9;]*m/g, "").replace(/\r/g, "");
+    // 命令回显里也含标记，取最后一次出现的位置才能拿到真正的结果
     const start = clean.lastIndexOf(START_MARKER);
     const end = clean.lastIndexOf(END_MARKER);
     if (start < 0 || end <= start) return null;
-    const raw = clean.slice(start + START_MARKER.length, end).trim();
-    if (!raw || raw === "(null)") return null;
-    // birthtime 以秒级时间戳返回（Linux、macOS 的 stat -f %B）
-    if (/^\d+$/.test(raw)) {
-        const seconds = Number(raw);
-        return seconds > 0 ? seconds * 1000 : null;
-    }
-    const parsed = Date.parse(raw);
-    return Number.isNaN(parsed) ? null : parsed;
+    const raw = clean.slice(start + START_MARKER.length, end);
+    const [primary, fallback] = raw.split("|");
+    return parseValue(primary ?? "") ?? parseValue(fallback ?? "");
 }
 
 /** 执行命令并取回输出；超时或宿主不支持时返回 null */
