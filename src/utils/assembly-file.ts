@@ -7,6 +7,7 @@
  */
 
 import { readRecentRecords, rememberAssemblyFile, writeRecentRecords } from "./assembly-file-history";
+import { readFileInfoFromShell } from "./file-meta";
 
 /** 原生文件对话框的 DLL 过滤条件 */
 const DLL_FILE_FILTERS = [{ name: "Assembly", extensions: ["dll"] }];
@@ -110,11 +111,28 @@ export async function refreshRecentAssemblyFiles(scope: string): Promise<Assembl
                 modifiedAt: Number.isNaN(modifiedAt) ? 0 : modifiedAt,
                 addedAt: 0,
             };
-        } catch (e) { // 元信息读取失败：先确认文件是否真的不存在，避免误删历史
+        } catch (e) { // 元信息读取失败：可能是宿主重启后访问授权失效，先改用终端读真实属性
+            const shellInfo = await readFileInfoFromShell(record.path);
+            if (shellInfo?.meta) {
+                console.warn("[assembly-file] fileSystem 读取被拒，已通过终端取到文件属性:", record.path, e);
+                return {
+                    path: record.path,
+                    name: fileNameOf(record.path),
+                    size: shellInfo.meta.size,
+                    modifiedAt: shellInfo.meta.modifiedAt,
+                    addedAt: shellInfo.meta.addedAt,
+                };
+            }
+            // 终端确认文件已不存在：直接移除记录
+            if (shellInfo && !shellInfo.exists) {
+                console.warn("[assembly-file] 最近文件已不存在，将从列表中移除:", record.path);
+                return null;
+            }
+            // 终端也判断不了：再问 fileSystem 是否存在，连它都失败时保守保留记录
             let exists: boolean;
             try {
                 exists = await fileSystem.exists(record.path);
-            } catch (existsError) { // 连存在性都判断不了时保守保留记录
+            } catch (existsError) {
                 console.warn("[assembly-file] 检查最近文件是否存在失败，保留记录:", record.path, existsError);
                 exists = true;
             }

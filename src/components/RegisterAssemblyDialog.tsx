@@ -11,7 +11,7 @@ import {
     refreshRecentAssemblyFiles,
 } from "../utils/assembly-file";
 import { NEW_ASSEMBLY_FILE_SCOPE, rememberAssemblyFile } from "../utils/assembly-file-history";
-import { readFileAddedTime } from "../utils/file-added-time";
+import { readFileInfoFromShell } from "../utils/file-meta";
 import type { AssemblyFileInfo, LoadedAssemblyFile } from "../utils/assembly-file";
 import { SearchableSelect } from "./SearchableSelect";
 
@@ -65,8 +65,11 @@ export function RegisterAssemblyDialog({
      * 因此先渲染已有的信息，读到后再补上；读不到时保持 0，界面显示为未知。
      */
     const fillAddedTime = (info: AssemblyFileInfo, isCancelled: () => boolean = () => false) => {
-        void readFileAddedTime(info.path).then((addedAt) => {
-            if (isCancelled() || addedAt === null) return;
+        // 已经拿到添加日期（例如由历史校验时的终端兜底提供）就不再重复查一次
+        if (info.addedAt > 0) return;
+        void readFileInfoFromShell(info.path).then((shellInfo) => {
+            const addedAt = shellInfo?.meta?.addedAt ?? 0;
+            if (isCancelled() || addedAt === 0) return;
             setSelectedFile((current) => (current && current.path === info.path ? { ...current, addedAt } : current));
         });
     };
