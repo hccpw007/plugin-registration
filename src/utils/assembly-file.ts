@@ -24,7 +24,7 @@ export interface AssemblyFileInfo {
     size: number;
     /** 文件最后修改时间（实时读取，毫秒时间戳） */
     modifiedAt: number;
-    /** 该文件加入当前表单的时间（毫秒时间戳） */
+    /** 文件在系统上的添加日期（异步补齐，毫秒时间戳；0 表示暂时读不到） */
     addedAt: number;
 }
 
@@ -108,7 +108,7 @@ export async function refreshRecentAssemblyFiles(scope: string): Promise<Assembl
                 size: stat.size,
                 // mtime 解析失败时退化为 0，界面显示为未修改时间
                 modifiedAt: Number.isNaN(modifiedAt) ? 0 : modifiedAt,
-                addedAt: record.lastUsedAt,
+                addedAt: 0,
             };
         } catch (e) { // 元信息读取失败：先确认文件是否真的不存在，避免误删历史
             let exists: boolean;
@@ -120,7 +120,7 @@ export async function refreshRecentAssemblyFiles(scope: string): Promise<Assembl
             }
             if (exists) {
                 console.warn("[assembly-file] 无法读取最近文件的元信息，保留记录:", record.path, e);
-                return { path: record.path, name: fileNameOf(record.path), size: 0, modifiedAt: 0, addedAt: record.lastUsedAt };
+                return { path: record.path, name: fileNameOf(record.path), size: 0, modifiedAt: 0, addedAt: 0 };
             }
             console.warn("[assembly-file] 最近文件已不存在，将从列表中移除:", record.path, e);
             return null;
@@ -129,7 +129,9 @@ export async function refreshRecentAssemblyFiles(scope: string): Promise<Assembl
 
     const existing = verified.filter((item): item is AssemblyFileInfo => item !== null);
     if (existing.length !== records.length) {
-        writeRecentRecords(scope, existing.map((item) => ({ path: item.path, lastUsedAt: item.addedAt })));
+        // 只保留校验通过的记录，原有排序与使用时间保持不变
+        const keptPaths = new Set(existing.map((item) => item.path));
+        writeRecentRecords(scope, records.filter((record) => keptPaths.has(record.path)));
     }
     return existing;
 }
@@ -142,13 +144,13 @@ async function readAssemblyFileFromPath(path: string): Promise<LoadedAssemblyFil
     const payload: unknown = await fileSystem.readBinary(path);
     const modifiedAt = Date.parse(stat.mtime);
     return {
-        // mtime 解析失败时退化为 0；addedAt 取读取时刻，即本次加入表单的时间
+        // mtime 解析失败时退化为 0；addedAt 需要额外系统命令，由界面异步补齐
         info: {
             path,
             name: fileNameOf(path),
             size: stat.size,
             modifiedAt: Number.isNaN(modifiedAt) ? 0 : modifiedAt,
-            addedAt: Date.now(),
+            addedAt: 0,
         },
         content: bytesToBase64(toBytes(payload)),
     };
@@ -169,7 +171,7 @@ export async function pickAssemblyFile(scope: string, defaultPath?: string): Pro
     if (!path.toLowerCase().endsWith(".dll")) throw new Error("Please select a .dll file.");
     const loaded = await readAssemblyFileFromPath(path);
     // 只记入当前程序集的历史，其他程序集的文件列表不受影响
-    rememberAssemblyFile(scope, path, loaded.info.addedAt);
+    rememberAssemblyFile(scope, path, Date.now());
     return loaded;
 }
 
@@ -192,7 +194,7 @@ export async function readBrowserAssemblyFile(file: File): Promise<LoadedAssembl
         name: file.name,
         size: file.size,
         modifiedAt: file.lastModified,
-        addedAt: Date.now(),
+        addedAt: 0,
     };
     return { info, content: bytesToBase64(bytes) };
 }

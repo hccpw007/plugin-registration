@@ -11,6 +11,7 @@ import {
     refreshRecentAssemblyFiles,
 } from "../utils/assembly-file";
 import { NEW_ASSEMBLY_FILE_SCOPE, rememberAssemblyFile } from "../utils/assembly-file-history";
+import { readFileAddedTime } from "../utils/file-added-time";
 import type { AssemblyFileInfo, LoadedAssemblyFile } from "../utils/assembly-file";
 import { SearchableSelect } from "./SearchableSelect";
 
@@ -56,6 +57,18 @@ export function RegisterAssemblyDialog({
     // 避免把一个程序集的 dll 带到另一个程序集上
     const fileScope = existingAssembly?.pluginassemblyid ?? NEW_ASSEMBLY_FILE_SCOPE;
 
+    /**
+     * 显示选中的文件，并异步补齐它的"添加日期"。
+     * 添加日期是文件系统属性、宿主 fileSystem API 不提供，需要额外系统命令读取，
+     * 因此先渲染已有的信息，读到后再补上；读不到时保持 0，界面显示为未知。
+     */
+    const fillAddedTime = (info: AssemblyFileInfo, isCancelled: () => boolean = () => false) => {
+        void readFileAddedTime(info.path).then((addedAt) => {
+            if (isCancelled() || addedAt === null) return;
+            setSelectedFile((current) => (current && current.path === info.path ? { ...current, addedAt } : current));
+        });
+    };
+
     // Reset form state whenever the dialog opens or the target assembly changes
     useEffect(() => {
         if (!isOpen) return;
@@ -93,6 +106,7 @@ export function RegisterAssemblyDialog({
                 setContent(loaded.content);
                 setAssemblyName(loaded.info.name.replace(/\.dll$/i, ""));
                 setRestoredFromLast(true);
+                fillAddedTime(loaded.info, () => cancelled);
             } catch (e) { // 恢复失败不阻断用户手动选择
                 console.error("[RegisterAssemblyDialog] 恢复最近使用的程序集文件失败:", e);
             } finally {
@@ -111,6 +125,7 @@ export function RegisterAssemblyDialog({
         setContent(loaded.content);
         setAssemblyName(loaded.info.name.replace(/\.dll$/i, ""));
         setRestoredFromLast(fromRecent);
+        fillAddedTime(loaded.info);
         setRecentFiles(await refreshRecentAssemblyFiles(fileScope));
     };
 
@@ -142,8 +157,8 @@ export function RegisterAssemblyDialog({
                 setFileError("Unable to read this file. Choose another file.");
                 return;
             }
-            // 选中的文件前移为最近使用，addedAt 为本次加入表单的时间
-            rememberAssemblyFile(fileScope, path, loaded.info.addedAt);
+            // 选中的文件前移为最近使用
+            rememberAssemblyFile(fileScope, path, Date.now());
             await applyLoadedFile(loaded, false);
         } catch (e) {
             console.error("[RegisterAssemblyDialog] 读取最近选择的程序集文件失败:", e);
@@ -254,7 +269,9 @@ export function RegisterAssemblyDialog({
                                     )}
                                     <span className="file-info-meta">
                                         {selectedFile.size > 0 ? formatFileSize(selectedFile.size) : "Size unavailable"}
-                                        {" · Added "}{formatDateTime(selectedFile.addedAt)}
+                                        {selectedFile.addedAt > 0
+                                            ? ` · Added ${formatDateTime(selectedFile.addedAt)}`
+                                            : " · Added unavailable"}
                                         {selectedFile.modifiedAt > 0 && ` · Modified ${formatDateTime(selectedFile.modifiedAt)}`}
                                     </span>
                                 </div>
